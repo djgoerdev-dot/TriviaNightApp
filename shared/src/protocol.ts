@@ -12,6 +12,7 @@ export type SessionPhase =
   | 'BOARD_ANSWER'
   | 'BOARD_CARDS'
   | 'CATEGORY_SCORES'
+  | 'BREAK'
   | 'FINISHED'
   | 'PAUSED';
 
@@ -45,6 +46,10 @@ export interface Category {
   eventId: string;
   title: string;
   position: number;
+  /** When true, the night pauses on a BREAK screen after this category's scores. */
+  breakAfter: boolean;
+  /** Optional label for that break, e.g. "Dinner" or "15 minutes". */
+  breakNote?: string | null;
   questions: Question[];
 }
 
@@ -92,11 +97,14 @@ export interface LiveSessionState {
   status: 'draft' | 'live' | 'ended';
   phase: SessionPhase;
   currentCategoryIndex: number;
+  totalCategories?: number;
   currentQuestionIndex: number;
   currentCategory?: {
     id: string;
     title: string;
     totalQuestions: number;
+    breakAfter: boolean;
+    breakNote?: string | null;
   } | null;
   currentQuestion?: {
     id: string;
@@ -161,4 +169,5 @@ export type ServerMessage =
   | { type: 'board.spotlight'; payload: { teamId: string | null } }
   | { type: 'leaderboard.update'; payload: { standings: { teamId: string; name: string; score: number; rank: number }[] } }
   | { type: 'team.registered'; payload: { teamId: string; teamName: string; teamPin: string; deviceToken: string } }
+  | { type: 'team.taken_over'; payload: { message: string } }
   | { type: 'error'; payload: { message: string; code?: string } };

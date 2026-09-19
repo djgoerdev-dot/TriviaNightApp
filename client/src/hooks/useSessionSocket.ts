@@ -47,11 +47,14 @@ export function useSessionSocket({
   // and the server-corrected team name arrives with it.
   const [registeredTeam, setRegisteredTeam] = useState<RegisteredTeam | null>(null);
   const [answerAck, setAnswerAck] = useState<AnswerAck | null>(null);
+  const [isTakenOver, setIsTakenOver] = useState(false);
+  const [takenOverMessage, setTakenOverMessage] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptsRef = useRef(0);
   const closedByUsRef = useRef(false);
+  const takenOverRef = useRef(false);
 
   // The handshake to (re)send whenever a socket opens. Holding it in a ref is
   // what keeps the connection independent of the code input: typing in the
@@ -171,6 +174,20 @@ export function useSessionSocket({
             break;
           }
 
+          case 'team.taken_over': {
+            takenOverRef.current = true;
+            setIsTakenOver(true);
+            setTakenOverMessage(msg.payload.message);
+            setRegisteredTeam(null);
+            handshakeRef.current = null;
+            try {
+              localStorage.removeItem('trivia.deviceToken');
+              localStorage.removeItem('trivia.teamPin');
+              localStorage.removeItem('trivia.teamName');
+            } catch { /* private mode */ }
+            break;
+          }
+
           case 'error':
             setLastError(msg.payload.message);
             break;
@@ -183,9 +200,9 @@ export function useSessionSocket({
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       setIsConnected(false);
-      if (closedByUsRef.current) return;
+      if (closedByUsRef.current || takenOverRef.current || event?.code === 4001) return;
 
       // Exponential backoff, so a server that is down is not hammered every 2s
       // by every phone in the room.
@@ -274,6 +291,12 @@ export function useSessionSocket({
     rawSend({ type: 'host.rename_team', payload: { teamId, newName } });
   }, [rawSend]);
 
+  const resetTakenOver = useCallback(() => {
+    takenOverRef.current = false;
+    setIsTakenOver(false);
+    setTakenOverMessage(null);
+  }, []);
+
   return {
     isConnected,
     sessionState,
@@ -281,6 +304,9 @@ export function useSessionSocket({
     spotlightTeamId,
     lastError,
     clearError,
+    isTakenOver,
+    takenOverMessage,
+    resetTakenOver,
     registeredTeam,
     answerAck,
     serverNow,

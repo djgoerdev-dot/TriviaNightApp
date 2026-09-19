@@ -252,10 +252,32 @@ async function runE2ETest() {
   assert.strictEqual(session.spotlightTeamId, null);
   console.log('✓ Card un-spotlighted');
 
+  // 13. Single-device enforcement: when another device rejoins with the PIN,
+  // the previous device must be notified with team.taken_over and closed.
+  const takeoverWs = await createClient();
+  const takeoverSeen = collect(takeoverWs);
+  let oldSocketClosed = false;
+  teamWs.on('close', () => { oldSocketClosed = true; });
+
+  takeoverWs.send(JSON.stringify({
+    type: 'rejoin',
+    payload: { code, teamName: 'E2E Champions', teamPin: registered.payload.teamPin, deviceToken: 'token-takeover' }
+  }));
+  await new Promise((r) => setTimeout(r, 150));
+
+  const takeoverRegistered = takeoverSeen.find(m => m.type === 'team.registered');
+  assert(takeoverRegistered, 'Takeover device should register as the team');
+
+  const takenOverMsg = teamSeen.find(m => m.type === 'team.taken_over');
+  assert(takenOverMsg, 'Previous device socket should receive team.taken_over');
+  assert.strictEqual(oldSocketClosed, true, 'Previous device socket should be closed by server');
+  console.log('✓ Single device takeover: old socket received team.taken_over and was closed');
+
   // Clean up
   hostWs.close();
   screenWs.close();
   teamWs.close();
+  takeoverWs.close();
   impostorWs.close();
   await app.close();
 

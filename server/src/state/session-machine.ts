@@ -86,8 +86,9 @@ export class LiveSession {
 
   private loadEventData() {
     const catRows = db.prepare(`
-      SELECT id, title, position FROM categories WHERE event_id = ? ORDER BY position ASC
-    `).all(this.eventId) as { id: string; title: string; position: number }[];
+      SELECT id, title, position, break_after, break_note
+      FROM categories WHERE event_id = ? ORDER BY position ASC
+    `).all(this.eventId) as { id: string; title: string; position: number; break_after: number; break_note: string | null }[];
 
     this.categories = [];
     this.flatQuestions = [];
@@ -111,11 +112,17 @@ export class LiveSession {
         position: q.position
       }));
 
+      if (questions.length === 0) {
+        continue;
+      }
+
       this.categories.push({
         id: cat.id,
         eventId: this.eventId,
         title: cat.title,
         position: cat.position,
+        breakAfter: cat.break_after === 1,
+        breakNote: cat.break_note,
         questions
       });
 
@@ -187,6 +194,14 @@ export class LiveSession {
     this.onStateChange();
   }
 
+  private advanceToNextCategory() {
+    this.currentCategoryIndex++;
+    this.currentQuestionIndex = 0;
+    this.phase = 'CATEGORY_INTRO';
+    this.persistSession();
+    this.onStateChange();
+  }
+
   private get isLastQuestionInCategory(): boolean {
     const cat = this.currentCategory;
     return !cat || this.currentQuestionIndex + 1 >= cat.questions.length;
@@ -200,7 +215,7 @@ export class LiveSession {
    *     └─ QUESTION_LIVE → QUESTION_LOCKED → BOARD_ANSWER → BOARD_CARDS ─┐
    *          ↑                                                           │
    *          └──────────────── next question in category ────────────────┘
-   *     └─ after the last question → CATEGORY_SCORES → next category
+   *     └─ after the last question → BREAK (if break) or next category → FINISHED
    */
   public nextPhase() {
     switch (this.phase) {
@@ -230,33 +245,57 @@ export class LiveSession {
         this.onStateChange();
         break;
 
-      case 'BOARD_CARDS':
-        // Marking confirmed. Next question, or the category leaderboard.
+      case 'BOARD_CARDS': {
+        // Marking confirmed. Next question, or break / next category / finished.
         this.recalculateScores();
         if (!this.isLastQuestionInCategory) {
           this.currentQuestionIndex++;
           this.openCurrentQuestion();
         } else {
-          this.phase = 'CATEGORY_SCORES';
-          this.persistSession();
-          this.onStateChange();
+          const hasNextCategory = this.currentCategoryIndex + 1 < this.categories.length;
+          if (hasNextCategory && this.currentCategory?.breakAfter) {
+            this.phase = 'BREAK';
+            this.persistSession();
+            this.onStateChange();
+          } else if (hasNextCategory) {
+            this.advanceToNextCategory();
+          } else {
+            this.phase = 'FINISHED';
+            this.status = 'ended';
+            this.endedAt = Date.now();
+            this.persistSession();
+            this.onStateChange();
+          }
         }
         break;
+      }
 
-      case 'CATEGORY_SCORES':
-        // Next category or finished
-        if (this.currentCategoryIndex + 1 < this.categories.length) {
-          this.currentCategoryIndex++;
-          this.currentQuestionIndex = 0;
-          this.phase = 'CATEGORY_INTRO';
+      case 'CATEGORY_SCORES': {
+        const hasNextCategory = this.currentCategoryIndex + 1 < this.categories.length;
+
+        // A break the host authored sits between two categories, so it only
+        // runs when there is actually another category to come back to.
+        if (hasNextCategory && this.currentCategory?.breakAfter) {
+          this.phase = 'BREAK';
           this.persistSession();
           this.onStateChange();
+          break;
+        }
+
+        if (hasNextCategory) {
+          this.advanceToNextCategory();
         } else {
           this.phase = 'FINISHED';
           this.status = 'ended';
           this.persistSession();
           this.onStateChange();
         }
+        break;
+      }
+
+      case 'BREAK':
+        // The host decides when the room comes back.
+        this.advanceToNextCategory();
         break;
 
       default:
@@ -281,7 +320,6 @@ export class LiveSession {
 
       case 'QUESTION_LIVE':
       case 'QUESTION_LOCKED': {
-        if (this.currentQuestionIndex === 0) return;
         if (this.timerHandle) {
           clearTimeout(this.timerHandle);
           this.timerHandle = null;
@@ -289,8 +327,25 @@ export class LiveSession {
         this.questionEndsAt = null;
         this.graceQuestionId = null;
         this.graceUntil = null;
-        this.currentQuestionIndex--;
-        this.phase = 'BOARD_CARDS'; // re-open the previous question's board
+        if (this.currentQuestionIndex > 0) {
+          this.currentQuestionIndex--;
+          this.phase = 'BOARD_CARDS'; // re-open the previous question's board
+        } else {
+          this.phase = 'CATEGORY_INTRO';
+        }
+        break;
+      }
+
+      case 'CATEGORY_INTRO': {
+        if (this.currentCategoryIndex === 0) return;
+        this.currentCategoryIndex--;
+        const prevCat = this.categories[this.currentCategoryIndex];
+        if (prevCat && prevCat.breakAfter) {
+          this.phase = 'BREAK';
+        } else {
+          this.currentQuestionIndex = Math.max(0, (prevCat?.questions.length || 1) - 1);
+          this.phase = 'BOARD_CARDS';
+        }
         break;
       }
 
@@ -298,6 +353,22 @@ export class LiveSession {
         // Back into the board for the category's final question.
         this.phase = 'BOARD_CARDS';
         break;
+
+      case 'BREAK': {
+        const cat = this.currentCategory;
+        this.currentQuestionIndex = Math.max(0, (cat?.questions.length || 1) - 1);
+        this.phase = 'BOARD_CARDS';
+        break;
+      }
+
+      case 'FINISHED': {
+        this.status = 'active';
+        this.endedAt = null;
+        const cat = this.currentCategory;
+        this.currentQuestionIndex = Math.max(0, (cat?.questions.length || 1) - 1);
+        this.phase = 'BOARD_CARDS';
+        break;
+      }
 
       default:
         return;
@@ -310,7 +381,23 @@ export class LiveSession {
 
   public openCurrentQuestion() {
     const q = this.currentQuestion;
-    if (!q) return;
+    if (!q) {
+      const hasNextCategory = this.currentCategoryIndex + 1 < this.categories.length;
+      if (hasNextCategory && this.currentCategory?.breakAfter) {
+        this.phase = 'BREAK';
+        this.persistSession();
+        this.onStateChange();
+      } else if (hasNextCategory) {
+        this.advanceToNextCategory();
+      } else {
+        this.phase = 'FINISHED';
+        this.status = 'ended';
+        this.endedAt = Date.now();
+        this.persistSession();
+        this.onStateChange();
+      }
+      return;
+    }
 
     if (this.timerHandle) {
       clearTimeout(this.timerHandle);
@@ -790,11 +877,14 @@ export class LiveSession {
       status: this.status,
       phase: this.phase,
       currentCategoryIndex: this.currentCategoryIndex,
+      totalCategories: this.categories.length,
       currentQuestionIndex: this.currentQuestionIndex,
       currentCategory: this.currentCategory ? {
         id: this.currentCategory.id,
         title: this.currentCategory.title,
-        totalQuestions: this.currentCategory.questions.length
+        totalQuestions: this.currentCategory.questions.length,
+        breakAfter: this.currentCategory.breakAfter,
+        breakNote: this.currentCategory.breakNote ?? null
       } : null,
       currentQuestion: q ? {
         id: q.id,

@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   host_id TEXT NOT NULL,
   title TEXT NOT NULL,
+  event_date TEXT,            -- informational only (ISO yyyy-mm-dd)
+  location TEXT,              -- informational only
   answer_mode TEXT NOT NULL DEFAULT 'ink',
   settings_json TEXT,
   created_at INTEGER NOT NULL,
@@ -21,6 +23,8 @@ CREATE TABLE IF NOT EXISTS categories (
   event_id TEXT NOT NULL,
   title TEXT NOT NULL,
   position INTEGER NOT NULL,
+  break_after INTEGER NOT NULL DEFAULT 0,  -- take a break once this category's scores are up
+  break_note TEXT,                          -- e.g. "Dinner", "15 minutes"
   FOREIGN KEY (event_id) REFERENCES events(id)
 );
 

@@ -3,7 +3,7 @@ import { useSessionSocket } from '../hooks/useSessionSocket';
 import { InkCanvas } from '../components/ink/InkCanvas';
 import { InkSvg } from '../components/ink/InkSvg';
 import type { StrokeInk } from '@trivia/shared';
-import { CheckCircle2, ArrowUpRight, Sparkles, Smartphone, Maximize2, Minimize2, X, Clock } from 'lucide-react';
+import { CheckCircle2, ArrowUpRight, Sparkles, Smartphone, Maximize2, Minimize2, X, Clock, Coffee } from 'lucide-react';
 
 export const PlayRoute: React.FC = () => {
   // Query parameters: ?code=123456
@@ -164,6 +164,9 @@ export const PlayRoute: React.FC = () => {
     boardCards,
     lastError,
     clearError,
+    isTakenOver,
+    takenOverMessage,
+    resetTakenOver,
     registeredTeam,
     answerAck,
     serverNow,
@@ -314,6 +317,33 @@ export const PlayRoute: React.FC = () => {
   const currentHasStrokes = currentInk && currentInk.s && currentInk.s.length > 0;
   const displayInk = (cardHasStrokes ? rawCardInk : null) || (lockedHasStrokes ? lockedInk : null) || (currentHasStrokes ? currentInk : null);
   const displayText = myCard?.answerRaw;
+
+  // --- Render Taken Over State (Single-Device Enforcement) ---
+  if (isTakenOver) {
+    return (
+      <div className="min-h-screen h-[100dvh] flex items-center justify-center p-6 bg-[#0E1311] text-white font-sans">
+        <div className="max-w-md w-full bg-[#18231F] border border-[#B93E33]/60 rounded-2xl p-6 shadow-2xl flex flex-col items-center text-center">
+          <div className="w-14 h-14 rounded-full bg-[#B93E33]/20 text-[#FFA399] flex items-center justify-center mb-4">
+            <Smartphone size={28} />
+          </div>
+          <h2 className="text-xl font-bold mb-2 text-white">Device Disconnected</h2>
+          <p className="text-sm text-[#A2B5AD] mb-6 leading-relaxed">
+            {takenOverMessage || 'Another device has logged in using your team PIN. Single-device mode is enforced, so this device has been disconnected.'}
+          </p>
+          <button
+            onClick={() => {
+              resetTakenOver();
+              setIsJoined(false);
+              clearError();
+            }}
+            className="px-6 py-2.5 bg-[#238B5E] hover:bg-[#1C754E] text-white rounded-xl font-bold text-sm shadow transition-all"
+          >
+            Back to Join Screen
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // --- Render Unjoined State ---
   if (!isJoined) {
@@ -758,6 +788,62 @@ export const PlayRoute: React.FC = () => {
                   )}
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Phase: BREAK */}
+        {phase === 'BREAK' && (
+          <div className="flex-1 flex flex-col bg-[#18231F] border border-[#2B3A33] rounded-2xl p-4 shadow-sm min-h-0 text-white">
+            <div className="flex items-center justify-between pb-3 mb-3 border-b border-[#2B3A33] flex-none">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#2FA879]/20 flex items-center justify-center text-[#2FA879] flex-none">
+                  <Coffee size={22} />
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[#2FA879] bg-[#2FA879]/15 px-2 py-0.5 rounded">
+                    Break Time
+                  </span>
+                  <h2 className="text-base font-bold text-white mt-0.5">
+                    {sessionState?.currentCategory?.breakNote || 'Intermission'}
+                  </h2>
+                </div>
+              </div>
+              <div className="px-3 py-1.5 rounded-xl bg-[#2FA879]/15 border border-[#2FA879]/40 text-right">
+                <span className="text-[10px] uppercase tracking-wider block text-[#8A9F97]">Your Score</span>
+                <span className="font-mono font-bold text-base text-[#2FA879]">{myTeam?.score ?? 0} pts</span>
+              </div>
+            </div>
+
+            <div className="text-center mb-2 flex-none">
+              <span className="text-[11px] font-bold uppercase tracking-widest text-[#8A9F97]">
+                Leaderboard
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 flex-1 overflow-y-auto pr-1">
+              {sessionState?.teams
+                .slice()
+                .sort((a, b) => b.score - a.score)
+                .map((team, idx) => {
+                  const isMe = team.id === myTeam?.id;
+                  return (
+                    <div
+                      key={team.id}
+                      className={`flex items-center justify-between p-2.5 rounded-xl border text-xs ${
+                        isMe
+                          ? 'bg-[#132A20] border-[#2EA572] font-bold text-[#42DB99]'
+                          : 'bg-[#121A17] border-[#25332C] text-[#D3DFDA]'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <span className="w-4 font-mono font-bold text-center text-[#7E9189]">{idx + 1}</span>
+                        <span className="truncate">{team.name} {isMe && '(You)'}</span>
+                      </div>
+                      <span className="font-mono font-bold">{team.score} pts</span>
+                    </div>
+                  );
+                })}
             </div>
           </div>
         )}

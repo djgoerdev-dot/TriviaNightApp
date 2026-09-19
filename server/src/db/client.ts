@@ -33,6 +33,10 @@ function ensureColumn(table: string, column: string, ddl: string) {
 
 ensureColumn('sessions', 'current_category_index', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('sessions', 'current_question_index', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('events', 'event_date', 'TEXT');
+ensureColumn('events', 'location', 'TEXT');
+ensureColumn('categories', 'break_after', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('categories', 'break_note', 'TEXT');
 
 /**
  * Salted scrypt password hashing, stored as `scrypt$<salt hex>$<hash hex>`.

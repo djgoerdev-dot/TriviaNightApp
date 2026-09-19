@@ -4,7 +4,7 @@ import { useSessionSocket } from '../hooks/useSessionSocket';
 import { InkSvg } from '../components/ink/InkSvg';
 import { calculateStrokeUnits } from '../components/ink/ink-utils';
 import type { Submission } from '@trivia/shared';
-import { Trophy, Maximize2, X } from 'lucide-react';
+import { Trophy, Maximize2, X, Coffee } from 'lucide-react';
 
 // Must stay identical to the host console's list, or the key printed on a
 // card here would not be the key that toggles it there.
@@ -356,6 +356,51 @@ export const ScreenRoute: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+
+        {/* --- BREAK --- */}
+        {phase === 'BREAK' && (
+          <div className="flex-1 flex flex-col items-center justify-center max-w-4xl mx-auto w-full">
+            <div className="text-center mb-6">
+              <div className="flex items-center justify-center gap-3">
+                <Coffee size={32} className="text-[#2FA879]" />
+                <span className={`text-sm font-bold uppercase tracking-[0.2em] ${mutedClass}`}>
+                  Intermission / Break
+                </span>
+              </div>
+              <h2 className="text-4xl font-extrabold mt-1">Leaderboard</h2>
+              {sessionState?.currentCategory?.breakNote && (
+                <p className="mt-2 text-xl font-semibold text-[#2FA879]">
+                  {sessionState.currentCategory.breakNote}
+                </p>
+              )}
+              <p className={`mt-1 text-sm ${mutedClass}`}>
+                Scores are safe — the next category starts when your host is ready.
+              </p>
+            </div>
+
+            <div className="w-full grid grid-cols-2 gap-3 max-h-[520px] overflow-y-auto pr-2">
+              {teams
+                .slice()
+                .sort((a, b) => b.score - a.score)
+                .map((t, idx) => (
+                  <div
+                    key={t.id}
+                    className={`flex items-center justify-between p-4 rounded-xl border ${cardBorderClass} ${
+                      idx === 0
+                        ? 'border-[#1B7A5A] bg-[#1B7A5A]/15 font-extrabold text-lg'
+                        : isDark ? 'bg-[#171C1A]' : 'bg-white shadow-sm'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 truncate">
+                      <span className="w-6 text-center font-mono font-bold text-[#1B7A5A]">{idx + 1}</span>
+                      <span className="truncate">{t.name}</span>
+                    </div>
+                    <span className="font-mono font-extrabold text-xl">{t.score} pts</span>
+                  </div>
+                ))}
             </div>
           </div>
         )}

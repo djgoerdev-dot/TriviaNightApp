@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useSessionSocket } from '../hooks/useSessionSocket';
+import { AuthoringStudio } from './author/AuthoringStudio';
 import { InkSvg } from '../components/ink/InkSvg';
 import {
   Play,
@@ -13,7 +14,8 @@ import {
   Plus,
   KeyRound,
   Sliders,
-  ChevronRight
+  ChevronRight,
+  Coffee
 } from 'lucide-react';
 
 // A, Z and C are reserved for mark-all-correct / mark-all-wrong / clear, so
@@ -80,11 +82,14 @@ export const HostRoute: React.FC = () => {
 
   /** fetch() with the host bearer token; a 401 drops us back to sign-in. */
   const authFetch = async (url: string, init: RequestInit = {}) => {
+    // FormData sets its own multipart Content-Type, including the boundary —
+    // overriding it here would make the upload unparseable.
+    const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
     const res = await fetch(url, {
       ...init,
       headers: {
         ...(init.headers || {}),
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.body && !isFormData ? { 'Content-Type': 'application/json' } : {}),
         Authorization: `Bearer ${hostToken}`
       }
     });
@@ -418,7 +423,11 @@ export const HostRoute: React.FC = () => {
                     <span>
                       {sessionState && sessionState.currentQuestionIndex + 1 < (currentCategory?.totalQuestions || 0)
                         ? 'Confirm & Next Question (Enter)'
-                        : 'Confirm & Category Scores (Enter)'}
+                        : currentCategory?.breakAfter
+                          ? 'Confirm & Start Break (Enter)'
+                          : sessionState && (sessionState.totalCategories ? sessionState.currentCategoryIndex + 1 < sessionState.totalCategories : false)
+                            ? 'Confirm & Next Category (Enter)'
+                            : 'Confirm & Final Standings (Enter)'}
                     </span>
                   </button>
                 )}
@@ -428,7 +437,19 @@ export const HostRoute: React.FC = () => {
                     onClick={hostNextPhase}
                     className="flex items-center gap-2 px-6 py-2.5 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-xl font-bold text-sm shadow transition-all"
                   >
-                    <span>Next Category ▶</span>
+                    <span>
+                      {currentCategory?.breakAfter ? 'Start Break ▶' : 'Next Category ▶'}
+                    </span>
+                  </button>
+                )}
+
+                {phase === 'BREAK' && (
+                  <button
+                    onClick={hostNextPhase}
+                    className="flex items-center gap-2 px-6 py-2.5 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-xl font-bold text-sm shadow transition-all"
+                  >
+                    <Coffee size={16} />
+                    <span>End Break &amp; Start Next Category ▶</span>
                   </button>
                 )}
               </div>
@@ -559,6 +580,35 @@ export const HostRoute: React.FC = () => {
               </div>
             )}
 
+            {/* Break In Progress Card */}
+            {phase === 'BREAK' && (
+              <div className="bg-white border border-[#D2DACF] rounded-2xl p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-xl bg-[#D9EDE5] text-[#1B7A5A] flex items-center justify-center flex-none">
+                    <Coffee size={24} />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-widest text-[#5C6B64]">
+                      Intermission / Break
+                    </span>
+                    <h3 className="text-xl font-bold mt-0.5">
+                      {currentCategory?.breakNote || 'Break in Progress'}
+                    </h3>
+                    <p className="text-xs text-[#5C6B64] mt-1">
+                      Contestant phones and the projector screen are showing the break screen. When ready, proceed to the next category.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={hostNextPhase}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-xl font-bold text-sm shadow transition-all whitespace-nowrap self-start md:self-auto"
+                >
+                  <Coffee size={16} />
+                  <span>End Break ▶</span>
+                </button>
+              </div>
+            )}
+
             {/* Standings Summary & Roster */}
             <div className="bg-white border border-[#D2DACF] rounded-2xl p-5 shadow-sm">
               <h3 className="font-bold text-base mb-3">Live Standings ({sessionState?.teams.length || 0} Teams)</h3>
@@ -618,29 +668,7 @@ export const HostRoute: React.FC = () => {
         )
       ) : (
         /* --- Event Authoring Screen (§14) --- */
-        <div className="flex-1 p-6 max-w-5xl mx-auto w-full flex flex-col gap-6">
-          <div className="bg-white border border-[#D2DACF] rounded-2xl p-6 shadow-sm">
-            <h2 className="text-xl font-bold mb-4">Authored Events</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {events.map(ev => (
-                <div key={ev.id} className="p-4 rounded-xl border border-[#D2DACF] flex flex-col justify-between">
-                  <div>
-                    <h3 className="font-bold text-base">{ev.title}</h3>
-                    <p className="text-xs text-[#5C6B64] mt-1">
-                      Mode: <b className="uppercase">{ev.answer_mode}</b>
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => handleLaunchSession(ev.id)}
-                    className="mt-4 w-full py-2 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-lg font-bold text-xs shadow"
-                  >
-                    Launch Live Night
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+        <AuthoringStudio authFetch={authFetch} onLaunch={handleLaunchSession} />
       )}
 
       {/* Team PIN Drawer Modal */}

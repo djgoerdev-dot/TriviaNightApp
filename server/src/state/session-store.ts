@@ -28,6 +28,15 @@ export class SessionStore {
       throw new Error(`Event not found: ${eventId}`);
     }
 
+    const qCount = db.prepare(`
+      SELECT COUNT(*) as c FROM questions q
+      JOIN categories c ON q.category_id = c.id
+      WHERE c.event_id = ?
+    `).get(eventId) as any;
+    if (!qCount || qCount.c === 0) {
+      throw new Error('This event has no questions. Add questions before launching.');
+    }
+
     const sessionId = crypto.randomUUID();
     let joinCode = crypto.randomInt(100000, 1000000).toString();
 
@@ -91,6 +100,24 @@ export class SessionStore {
     if (!set) {
       set = new Set();
       this.clients.set(sessionId, set);
+    }
+
+    // Single-device enforcement: if another socket is already connected for this team,
+    // notify it of the takeover and disconnect it.
+    if (role === 'team' && teamId) {
+      const existingTeamClients = Array.from(set).filter(
+        c => c.role === 'team' && c.teamId === teamId && c.ws !== ws
+      );
+      for (const oldClient of existingTeamClients) {
+        this.send(oldClient.ws, {
+          type: 'team.taken_over',
+          payload: { message: 'Another device has logged in using your team PIN. Single-device mode is enforced.' }
+        });
+        try {
+          oldClient.ws.close(4001, 'Device taken over');
+        } catch { /* ignore */ }
+        this.unregisterClient(oldClient.ws);
+      }
     }
 
     const record: ClientRecord = { ws, role, teamId };

@@ -180,19 +180,21 @@ assert.strictEqual(session.currentQuestionIndex, q1Index + 1, 'Advanced to the n
 assert.strictEqual(session.spotlightTeamId, null, 'Opening a question clears any spotlight');
 console.log('✓ Per-question board cycle: question → board → next question');
 
-// Walk the rest of the category the same way, and land on the scores.
+// Walk the rest of the category the same way, and advance to the next category (no break configured).
 const totalQuestions = session.currentCategory!.questions.length;
 while (session.currentQuestionIndex < totalQuestions - 1 || session.phase !== 'BOARD_CARDS') {
   session.nextPhase();
-  if (session.phase === 'CATEGORY_SCORES') break;
+  if (session.phase === 'CATEGORY_INTRO') break;
 }
 if (session.phase === 'BOARD_CARDS') session.nextPhase();
-assert.strictEqual(session.phase, 'CATEGORY_SCORES', 'The last board in a category leads to the scores');
-console.log('✓ Last question in the category leads to CATEGORY_SCORES');
+assert.strictEqual(session.phase, 'CATEGORY_INTRO', 'The last board in a category without a break advances to the next category');
+assert.strictEqual(session.currentCategoryIndex, 1, 'Advanced to category 2');
+console.log('✓ Last question in category without a break advances directly to next category intro');
 
 // Back-navigation re-opens the previous board so a mark can be fixed.
 session.prevPhase();
-assert.strictEqual(session.phase, 'BOARD_CARDS', 'Back from scores re-opens the final board');
+assert.strictEqual(session.phase, 'BOARD_CARDS', 'Back from next category intro re-opens the previous category final board');
+assert.strictEqual(session.currentCategoryIndex, 0, 'Back in category 1');
 session.prevPhase();
 assert.strictEqual(session.phase, 'BOARD_ANSWER', 'Back from cards returns to the answer stage');
 session.prevPhase();
