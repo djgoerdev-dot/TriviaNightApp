@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ground: #EFF2EE;
+  --surface: #FFFFFF;
+  --surface-2: #E3E9E1;
+  --ink: #14181A;
+  --muted: #5C6B64;
+  --line: #D2DACF;
+  --accent: #1B7A5A;
+  --accent-soft: #D9EDE5;
+  --wrong: #B93E33;
+  --wrong-soft: #F6DEDB;
+  --sans: 'Archivo', system-ui, -apple-system, sans-serif;
+  --mono: 'IBM Plex Mono', monospace;
+}
+
+body {
+  font-family: var(--sans);
+  background: var(--ground);
+  color: var(--ink);
+  margin: 0;
+  padding: 0;
+  touch-action: manipulation;
+}
+
+/* Prevent double-tap zooming on buttons */
+button, input {
+  touch-action: manipulation;
+}
