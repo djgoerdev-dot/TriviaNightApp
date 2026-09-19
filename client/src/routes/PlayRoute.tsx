@@ -641,6 +641,7 @@ export const PlayRoute: React.FC = () => {
             <div className="flex-1 min-h-0 w-full relative z-10 flex flex-col items-center justify-center overflow-hidden">
               <InkCanvas
                 key={sessionState.currentQuestion.id}
+                teamName={teamName}
                 isLocked={isSubmitted || isSubmitting || phase === 'QUESTION_LOCKED'}
                 onStrokeChange={ink => setCurrentInk(ink)}
               />
@@ -700,7 +701,7 @@ export const PlayRoute: React.FC = () => {
             </div>
 
             {/* Blackboard Card: White Chalk on Slate */}
-            <div className="flex-1 bg-[#18231F] border-2 border-[#2B3A33] rounded-2xl p-2 shadow-inner flex flex-col items-center justify-between min-h-0 overflow-hidden">
+            <div className="flex-1 bg-[#18231F] border-2 border-[#2B3A33] rounded-2xl p-2 shadow-inner flex flex-col justify-between min-h-0 overflow-hidden">
               <div className="w-full text-[11px] font-bold uppercase tracking-wider text-[#8C9F97] mb-1 px-1 flex items-center justify-between flex-none">
                 <span>Team: <b className="text-white font-extrabold">{teamName}</b></span>
                 <span className="font-mono text-[10px] text-[#6A7D75]">Your Chalkboard</span>
@@ -709,11 +710,6 @@ export const PlayRoute: React.FC = () => {
               {/* Vector Chalk Drawing */}
               <div className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden">
                 <div
-                  style={{
-                    aspectRatio: '1000 / 360',
-                    maxHeight: '100%',
-                    maxWidth: '100%'
-                  }}
                   className="w-full h-full bg-[#121916] rounded-xl border border-[#25332C] overflow-hidden flex items-center justify-center p-2 relative shadow-[inset_0_2px_8px_rgba(0,0,0,0.6)]"
                 >
                   {displayInk && displayInk.s && displayInk.s.length > 0 ? (

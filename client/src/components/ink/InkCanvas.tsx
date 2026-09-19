@@ -4,24 +4,21 @@ import { VBW, VBH, simplifyPoints, pathD } from './ink-utils';
 import { Undo2, Eraser, Lock } from 'lucide-react';
 
 interface InkCanvasProps {
+  teamName?: string;
   onStrokeChange?: (ink: StrokeInk) => void;
   isLocked?: boolean;
   maxStrokes?: number;
 }
 
 export const InkCanvas: React.FC<InkCanvasProps> = ({
+  teamName,
   onStrokeChange,
   isLocked = false,
   maxStrokes = 80
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
-
-  const [boardSize, setBoardSize] = useState<{ width: number; height: number }>({
-    width: 0,
-    height: 0
-  });
+  const viewBoxWidthRef = useRef<number>(VBW);
 
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const strokesRef = useRef<Stroke[]>([]);
@@ -41,7 +38,7 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const scale = canvas.width / VBW;
+    const scale = canvas.height / VBH;
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
     ctx.strokeStyle = '#FFFFFF';
@@ -63,45 +60,35 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     }
   }, []);
 
-  // Responsive canvas sizing: fit BOTH available width and available height strictly
+  // Responsive canvas sizing: fit container and dynamically compute matching viewBox width
   const handleResize = useCallback(() => {
     const canvas = canvasRef.current;
-    const wrapper = wrapperRef.current;
-    if (!canvas || !wrapper) return;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
 
-    const { width: availW, height: availH } = wrapper.getBoundingClientRect();
-    if (availW <= 0 || availH <= 0) return;
-
-    const targetRatio = VBW / VBH; // 1000 / 360 ≈ 2.7778
-    let w = availW;
-    let h = Math.round(w / targetRatio);
-
-    if (h > availH) {
-      h = availH;
-      w = Math.round(h * targetRatio);
-    }
-
-    w = Math.max(w, 50);
-    h = Math.max(h, 20);
-
-    setBoardSize({ width: w, height: h });
+    const { width: w, height: h } = container.getBoundingClientRect();
+    if (w <= 0 || h <= 0) return;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
+
+    // Maintain uniform 1:1 scale by sizing viewBox width proportionally to height
+    const vbw = Math.round(VBH * (w / h));
+    viewBoxWidthRef.current = vbw;
 
     redraw();
   }, [redraw]);
 
   useEffect(() => {
     handleResize();
-    const wrapper = wrapperRef.current;
+    const container = containerRef.current;
     let ro: ResizeObserver | null = null;
-    if (wrapper && typeof ResizeObserver !== 'undefined') {
+    if (container && typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(() => {
         handleResize();
       });
-      ro.observe(wrapper);
+      ro.observe(container);
     }
 
     window.addEventListener('resize', handleResize);
@@ -118,7 +105,7 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     if (onStrokeChange) {
       onStrokeChange({
         v: 1,
-        box: [VBW, VBH],
+        box: [viewBoxWidthRef.current, VBH],
         s: updatedStrokes
       });
     }
@@ -147,7 +134,8 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return [0, 0];
     const rect = canvas.getBoundingClientRect();
-    const x = Math.round(((e.clientX - rect.left) / rect.width) * VBW);
+    const vbw = viewBoxWidthRef.current;
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * vbw);
     const y = Math.round(((e.clientY - rect.top) / rect.height) * VBH);
     return [x, y];
   };
@@ -181,9 +169,10 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
+    const vbw = viewBoxWidthRef.current;
 
     for (const ev of coalesced) {
-      const x = Math.round(((ev.clientX - rect.left) / rect.width) * VBW);
+      const x = Math.round(((ev.clientX - rect.left) / rect.width) * vbw);
       const y = Math.round(((ev.clientY - rect.top) / rect.height) * VBH);
       const p = currentStrokeRef.current.p;
       const len = p.length;
@@ -232,24 +221,23 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
   };
 
   return (
-    <div className="w-full h-full min-h-0 flex flex-col items-center justify-between gap-1 overflow-hidden">
-      {/* Drawing wrapper providing maximum available bounding box */}
-      <div ref={wrapperRef} className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden">
+    <div className="flex-1 w-full bg-[#18231F] border-2 border-[#2B3A33] rounded-2xl p-2 shadow-inner flex flex-col justify-between min-h-0 overflow-hidden">
+      {/* Blackboard Card Header: Exact match to Answer Board */}
+      <div className="w-full text-[11px] font-bold uppercase tracking-wider text-[#8C9F97] mb-1 px-1 flex items-center justify-between flex-none">
+        <span>Team: <b className="text-white font-extrabold">{teamName || 'Your Team'}</b></span>
+        <span className="font-mono text-[10px] text-[#6A7D75]">Your Chalkboard</span>
+      </div>
+
+      {/* Chalkboard Drawing Surface: Stretches full-width across card */}
+      <div className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden">
         <div
           ref={containerRef}
           style={{
-            width: boardSize.width > 0 ? `${boardSize.width}px` : '100%',
-            height: boardSize.height > 0 ? `${boardSize.height}px` : 'auto',
-            aspectRatio: '1000 / 360',
-            maxWidth: '100%',
-            maxHeight: '100%',
             backgroundImage:
               'linear-gradient(to bottom, transparent calc(70% - 1px), rgba(255, 255, 255, 0.12) calc(70% - 1px), rgba(255, 255, 255, 0.12) 70%, transparent 70%)'
           }}
-          className={`relative rounded-2xl border-2 overflow-hidden transition-colors shadow-inner flex items-center justify-center ${
-            isLocked
-              ? 'bg-[#141C19] border-[#25332C] cursor-not-allowed'
-              : 'bg-[#18231F] border-[#2F3E37] shadow-[inset_0_2px_12px_rgba(0,0,0,0.6)]'
+          className={`relative w-full h-full bg-[#121916] rounded-xl border border-[#25332C] overflow-hidden flex items-center justify-center shadow-[inset_0_2px_8px_rgba(0,0,0,0.6)] ${
+            isLocked ? 'cursor-not-allowed' : 'cursor-crosshair'
           }`}
         >
           <canvas
@@ -259,7 +247,7 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
             className={`block w-full h-full ${
-              isLocked ? 'pointer-events-none' : 'cursor-crosshair touch-none'
+              isLocked ? 'pointer-events-none' : 'touch-none'
             }`}
           />
 
@@ -291,14 +279,8 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
         </div>
       </div>
 
-      {/* Action buttons & Stroke Counter (Matches chalkboard width) */}
-      <div
-        style={{
-          width: boardSize.width > 0 ? `${boardSize.width}px` : '100%',
-          maxWidth: '100%'
-        }}
-        className="flex items-center justify-between px-1 flex-none h-7"
-      >
+      {/* Action buttons & Stroke Counter (Matches full card width) */}
+      <div className="w-full flex items-center justify-between px-1 pt-1.5 flex-none h-8">
         <div className="flex items-center gap-2">
           <button
             type="button"
