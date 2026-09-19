@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import type { Stroke, StrokeInk } from '@trivia/shared';
 import { VBW, VBH, simplifyPoints, pathD } from './ink-utils';
-import { Undo2, Trash2, Lock } from 'lucide-react';
+import { Undo2, Eraser, Lock } from 'lucide-react';
 
 interface InkCanvasProps {
   onStrokeChange?: (ink: StrokeInk) => void;
@@ -38,7 +38,9 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     const scale = canvas.width / VBW;
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
-    ctx.strokeStyle = '#14181A';
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.shadowColor = 'rgba(255, 255, 255, 0.45)';
+    ctx.shadowBlur = 1.5;
     ctx.lineWidth = 11;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -194,15 +196,18 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
   };
 
   return (
-    <div className="w-full flex flex-col gap-2">
+    <div className="w-full flex flex-col gap-1.5">
       <div
         ref={containerRef}
-        className={`relative w-full rounded-xl border border-[#D2DACF] overflow-hidden transition-colors ${
-          isLocked ? 'bg-[#E3E9E1] cursor-not-allowed' : 'bg-white shadow-sm'
+        className={`relative w-full rounded-2xl border-2 overflow-hidden transition-colors shadow-inner ${
+          isLocked
+            ? 'bg-[#141C19] border-[#25332C] cursor-not-allowed'
+            : 'bg-[#18231F] border-[#2F3E37] shadow-[inset_0_2px_12px_rgba(0,0,0,0.6)]'
         }`}
         style={{
-          // Ruled baseline at 72% height (matching the 250px baseline in 360px box)
-          backgroundImage: 'linear-gradient(to bottom, transparent calc(70% - 1px), #D2DACF calc(70% - 1px), #D2DACF 70%, transparent 70%)'
+          // Ruled baseline in faint chalk dust at 70% height
+          backgroundImage:
+            'linear-gradient(to bottom, transparent calc(70% - 1px), rgba(255, 255, 255, 0.12) calc(70% - 1px), rgba(255, 255, 255, 0.12) 70%, transparent 70%)'
         }}
       >
         <canvas
@@ -218,14 +223,14 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
 
         {/* Placeholder hint when canvas is clean */}
         {!isLocked && strokes.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#5C6B64] text-sm md:text-base font-medium select-none">
-            Write your answer with your finger
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#6A8177] text-sm md:text-base font-medium select-none tracking-wide">
+            Write your answer in chalk
           </div>
         )}
 
         {/* Lock Badges & Indicators */}
         {isLocked && strokes.length > 0 && (
-          <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#D9EDE5] text-[#1B7A5A] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
+          <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#132A20] text-[#42DB99] border border-[#2EA572] rounded-full text-xs font-bold uppercase tracking-wider shadow-md animate-fade-in">
             <Lock size={13} />
             <span>Answer locked</span>
           </div>
@@ -233,10 +238,10 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
 
         {isLocked && strokes.length === 0 && (
           <>
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#8C9A93] text-sm md:text-base font-medium select-none italic">
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#5A6C65] text-sm md:text-base font-medium select-none italic">
               — no answer recorded —
             </div>
-            <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#EFF2EE] text-[#5C6B64] border border-[#D2DACF] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
+            <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#1E2623] text-[#8C9F97] border border-[#3A4843] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
               <span>No answer</span>
             </div>
           </>
@@ -250,7 +255,7 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
             type="button"
             onClick={handleUndo}
             disabled={isLocked || strokes.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-white border border-[#D2DACF] rounded-lg text-[#14181A] hover:bg-[#F4F7F3] disabled:opacity-35 disabled:cursor-not-allowed transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[#1F2925] border border-[#31413A] rounded-xl text-[#D3DFDA] hover:bg-[#27342F] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
           >
             <Undo2 size={13} />
             <span>Undo</span>
@@ -259,14 +264,14 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
             type="button"
             onClick={handleClear}
             disabled={isLocked || strokes.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#5C6B64] hover:text-[#B93E33] hover:bg-[#F6DEDB] rounded-lg disabled:opacity-35 disabled:cursor-not-allowed transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[#1F2925] border border-[#31413A] rounded-xl text-[#A2B5AD] hover:text-[#FFA399] hover:bg-[#341F1D] hover:border-[#602B26] disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
           >
-            <Trash2 size={13} />
+            <Eraser size={13} />
             <span>Clear</span>
           </button>
         </div>
 
-        <div className="text-right text-[11px] font-mono text-[#5C6B64]">
+        <div className="text-right text-[11px] font-mono text-[#7E9189]">
           {strokes.length} {strokes.length === 1 ? 'stroke' : 'strokes'}
         </div>
       </div>
