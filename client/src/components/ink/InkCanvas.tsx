@@ -16,6 +16,12 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  const [boardSize, setBoardSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0
+  });
 
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const strokesRef = useRef<Stroke[]>([]);
@@ -28,7 +34,7 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
   // Redraw canvas content
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -57,25 +63,55 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     }
   }, []);
 
-  // Responsive canvas sizing
+  // Responsive canvas sizing: fit BOTH available width and available height strictly
   const handleResize = useCallback(() => {
     const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
+    const wrapper = wrapperRef.current;
+    if (!canvas || !wrapper) return;
 
-    const rect = container.getBoundingClientRect();
+    const { width: availW, height: availH } = wrapper.getBoundingClientRect();
+    if (availW <= 0 || availH <= 0) return;
+
+    const targetRatio = VBW / VBH; // 1000 / 360 ≈ 2.7778
+    let w = availW;
+    let h = Math.round(w / targetRatio);
+
+    if (h > availH) {
+      h = availH;
+      w = Math.round(h * targetRatio);
+    }
+
+    w = Math.max(w, 50);
+    h = Math.max(h, 20);
+
+    setBoardSize({ width: w, height: h });
+
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-
-    canvas.width = Math.round(rect.width * dpr);
-    canvas.height = Math.round(rect.width * (VBH / VBW) * dpr);
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
 
     redraw();
   }, [redraw]);
 
   useEffect(() => {
     handleResize();
+    const wrapper = wrapperRef.current;
+    let ro: ResizeObserver | null = null;
+    if (wrapper && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        handleResize();
+      });
+      ro.observe(wrapper);
+    }
+
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleResize);
+
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('orientationchange', handleResize);
+    };
   }, [handleResize]);
 
   const emitInkChange = useCallback((updatedStrokes: Stroke[]) => {
@@ -196,66 +232,79 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
   };
 
   return (
-    <div className="w-full flex flex-col gap-1.5">
-      <div
-        ref={containerRef}
-        className={`relative w-full rounded-2xl border-2 overflow-hidden transition-colors shadow-inner ${
-          isLocked
-            ? 'bg-[#141C19] border-[#25332C] cursor-not-allowed'
-            : 'bg-[#18231F] border-[#2F3E37] shadow-[inset_0_2px_12px_rgba(0,0,0,0.6)]'
-        }`}
-        style={{
-          // Ruled baseline in faint chalk dust at 70% height
-          backgroundImage:
-            'linear-gradient(to bottom, transparent calc(70% - 1px), rgba(255, 255, 255, 0.12) calc(70% - 1px), rgba(255, 255, 255, 0.12) 70%, transparent 70%)'
-        }}
-      >
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          className={`block w-full aspect-[1000/360] ${
-            isLocked ? 'pointer-events-none' : 'cursor-crosshair touch-none'
+    <div className="w-full h-full min-h-0 flex flex-col items-center justify-between gap-1 overflow-hidden">
+      {/* Drawing wrapper providing maximum available bounding box */}
+      <div ref={wrapperRef} className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden">
+        <div
+          ref={containerRef}
+          style={{
+            width: boardSize.width > 0 ? `${boardSize.width}px` : '100%',
+            height: boardSize.height > 0 ? `${boardSize.height}px` : 'auto',
+            aspectRatio: '1000 / 360',
+            maxWidth: '100%',
+            maxHeight: '100%',
+            backgroundImage:
+              'linear-gradient(to bottom, transparent calc(70% - 1px), rgba(255, 255, 255, 0.12) calc(70% - 1px), rgba(255, 255, 255, 0.12) 70%, transparent 70%)'
+          }}
+          className={`relative rounded-2xl border-2 overflow-hidden transition-colors shadow-inner flex items-center justify-center ${
+            isLocked
+              ? 'bg-[#141C19] border-[#25332C] cursor-not-allowed'
+              : 'bg-[#18231F] border-[#2F3E37] shadow-[inset_0_2px_12px_rgba(0,0,0,0.6)]'
           }`}
-        />
+        >
+          <canvas
+            ref={canvasRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            className={`block w-full h-full ${
+              isLocked ? 'pointer-events-none' : 'cursor-crosshair touch-none'
+            }`}
+          />
 
-        {/* Placeholder hint when canvas is clean */}
-        {!isLocked && strokes.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#6A8177] text-sm md:text-base font-medium select-none tracking-wide">
-            Write your answer in chalk
-          </div>
-        )}
-
-        {/* Lock Badges & Indicators */}
-        {isLocked && strokes.length > 0 && (
-          <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#132A20] text-[#42DB99] border border-[#2EA572] rounded-full text-xs font-bold uppercase tracking-wider shadow-md animate-fade-in">
-            <Lock size={13} />
-            <span>Answer locked</span>
-          </div>
-        )}
-
-        {isLocked && strokes.length === 0 && (
-          <>
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#5A6C65] text-sm md:text-base font-medium select-none italic">
-              — no answer recorded —
+          {/* Placeholder hint when canvas is clean */}
+          {!isLocked && strokes.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#6A8177] text-xs md:text-sm font-medium select-none tracking-wide">
+              Write your answer in chalk
             </div>
-            <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#1E2623] text-[#8C9F97] border border-[#3A4843] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
-              <span>No answer</span>
+          )}
+
+          {/* Lock Badges & Indicators */}
+          {isLocked && strokes.length > 0 && (
+            <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 px-2.5 py-1 bg-[#132A20] text-[#42DB99] border border-[#2EA572] rounded-full text-xs font-bold uppercase tracking-wider shadow-md animate-fade-in">
+              <Lock size={12} />
+              <span>Answer locked</span>
             </div>
-          </>
-        )}
+          )}
+
+          {isLocked && strokes.length === 0 && (
+            <>
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#5A6C65] text-xs md:text-sm font-medium select-none italic">
+                — no answer recorded —
+              </div>
+              <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 px-2.5 py-1 bg-[#1E2623] text-[#8C9F97] border border-[#3A4843] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
+                <span>No answer</span>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Action buttons & Stroke Counter */}
-      <div className="flex items-center justify-between px-1">
+      {/* Action buttons & Stroke Counter (Matches chalkboard width) */}
+      <div
+        style={{
+          width: boardSize.width > 0 ? `${boardSize.width}px` : '100%',
+          maxWidth: '100%'
+        }}
+        className="flex items-center justify-between px-1 flex-none h-7"
+      >
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={handleUndo}
             disabled={isLocked || strokes.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[#1F2925] border border-[#31413A] rounded-xl text-[#D3DFDA] hover:bg-[#27342F] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-[#1F2925] border border-[#31413A] rounded-lg text-[#D3DFDA] hover:bg-[#27342F] hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
           >
             <Undo2 size={13} />
             <span>Undo</span>
@@ -264,7 +313,7 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
             type="button"
             onClick={handleClear}
             disabled={isLocked || strokes.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-[#1F2925] border border-[#31413A] rounded-xl text-[#A2B5AD] hover:text-[#FFA399] hover:bg-[#341F1D] hover:border-[#602B26] disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-[#1F2925] border border-[#31413A] rounded-lg text-[#A2B5AD] hover:text-[#FFA399] hover:bg-[#341F1D] hover:border-[#602B26] disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-sm"
           >
             <Eraser size={13} />
             <span>Clear</span>

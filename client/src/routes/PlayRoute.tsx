@@ -512,9 +512,9 @@ export const PlayRoute: React.FC = () => {
 
         {/* Phase: QUESTION_LIVE or QUESTION_LOCKED (Question at the TOP, Canvas below) */}
         {(phase === 'QUESTION_LIVE' || phase === 'QUESTION_LOCKED') && sessionState?.currentQuestion && (
-          <div className="flex-1 flex flex-col min-h-0 gap-2">
+          <div className="flex-1 flex flex-col min-h-0 gap-1.5">
             {/* Top Bar: Question Box & Action */}
-            <div className="bg-[#18231F] border border-[#2B3A33] rounded-2xl p-2.5 md:p-3 shadow-md flex-none">
+            <div className="bg-[#18231F] border border-[#2B3A33] rounded-xl p-2 md:p-2.5 shadow-md flex-none z-20 relative">
               <div className="flex items-center justify-between gap-3 mb-1">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-[#8A9F97] truncate max-w-[200px]">
@@ -532,7 +532,7 @@ export const PlayRoute: React.FC = () => {
                       type="button"
                       onClick={handleSubmitAnswer}
                       disabled={!currentInk || !currentInk.s || currentInk.s.length === 0}
-                      className="px-4 py-1.5 bg-[#238B5E] hover:bg-[#1C754E] active:scale-[0.98] text-white rounded-xl font-bold text-xs md:text-sm shadow transition-all disabled:opacity-35 disabled:pointer-events-none"
+                      className="px-3.5 py-1 bg-[#238B5E] hover:bg-[#1C754E] active:scale-[0.98] text-white rounded-xl font-bold text-xs md:text-sm shadow transition-all disabled:opacity-35 disabled:pointer-events-none"
                     >
                       Lock it in
                     </button>
@@ -559,7 +559,7 @@ export const PlayRoute: React.FC = () => {
               </h3>
 
               {/* Sleek Timer Bar */}
-              <div className="w-full h-1.5 bg-[#121A17] rounded-full overflow-hidden mt-2 border border-[#25332C]">
+              <div className="w-full h-1 bg-[#121A17] rounded-full overflow-hidden mt-1.5 border border-[#25332C]">
                 <div
                   className="h-full bg-[#2EA572] shadow-[0_0_6px_rgba(46,165,114,0.6)] transition-all duration-100 ease-linear rounded-full"
                   style={{ width: `${timerPercent}%` }}
@@ -568,7 +568,7 @@ export const PlayRoute: React.FC = () => {
             </div>
 
             {/* Bottom: Full-Width Digital Blackboard */}
-            <div className="flex-1 flex flex-col min-h-0 justify-center">
+            <div className="flex-1 min-h-0 w-full relative z-10 flex flex-col items-center justify-center overflow-hidden">
               <InkCanvas
                 key={sessionState.currentQuestion.id}
                 isLocked={isSubmitted || isSubmitting || phase === 'QUESTION_LOCKED'}
@@ -580,15 +580,22 @@ export const PlayRoute: React.FC = () => {
 
         {/* Phase: BOARD_ANSWER or BOARD_CARDS (Look Up 👆 and Show Locked Answer) */}
         {(phase === 'BOARD_ANSWER' || phase === 'BOARD_CARDS') && (
-          <div className="flex-1 flex flex-col min-h-0 gap-2">
+          <div className="flex-1 flex flex-col min-h-0 gap-1.5">
             {/* Top Bar: Notice & Live Mark */}
-            <div className="bg-[#18231F] border border-[#2B3A33] rounded-2xl px-4 py-2 shadow-sm flex items-center justify-between flex-none">
+            <div className="bg-[#18231F] border border-[#2B3A33] rounded-xl px-3.5 py-1.5 shadow-sm flex items-center justify-between flex-none z-20">
               <div className="flex items-center gap-2.5 min-w-0">
                 <div className="w-7 h-7 rounded-lg bg-[#132A20] text-[#42DB99] border border-[#2EA572]/40 flex items-center justify-center flex-none">
                   <ArrowUpRight size={16} />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-xs font-extrabold text-[#F2F7F4] leading-tight">Look Up 👆</h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xs font-extrabold text-[#F2F7F4] leading-tight">Look Up 👆</h2>
+                    {sessionState?.currentQuestion?.prompt && (
+                      <span className="text-[11px] text-[#8C9F97] truncate hidden sm:inline">
+                        — {sessionState.currentQuestion.prompt}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-[11px] text-[#8C9F97] leading-tight truncate">
                     {phase === 'BOARD_ANSWER'
                       ? 'The correct answer is on the big screen! Cards will reveal shortly.'
@@ -623,21 +630,30 @@ export const PlayRoute: React.FC = () => {
             </div>
 
             {/* Blackboard Card: White Chalk on Slate */}
-            <div className="flex-1 bg-[#18231F] border-2 border-[#2B3A33] rounded-2xl p-2.5 shadow-inner flex flex-col justify-between min-h-0">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-[#8C9F97] mb-1 px-1 flex items-center justify-between">
+            <div className="flex-1 bg-[#18231F] border-2 border-[#2B3A33] rounded-2xl p-2 shadow-inner flex flex-col items-center justify-between min-h-0 overflow-hidden">
+              <div className="w-full text-[11px] font-bold uppercase tracking-wider text-[#8C9F97] mb-1 px-1 flex items-center justify-between flex-none">
                 <span>Team: <b className="text-white font-extrabold">{teamName}</b></span>
                 <span className="font-mono text-[10px] text-[#6A7D75]">Your Chalkboard</span>
               </div>
 
               {/* Vector Chalk Drawing */}
-              <div className="flex-1 w-full aspect-[1000/360] bg-[#121916] rounded-xl border border-[#25332C] overflow-hidden flex items-center justify-center p-2 relative shadow-[inset_0_2px_8px_rgba(0,0,0,0.6)]">
-                {displayInk && displayInk.s && displayInk.s.length > 0 ? (
-                  <InkSvg ink={displayInk} strokeUnits={18} className="w-full h-full block text-white" />
-                ) : displayText && displayText.trim() ? (
-                  <span className="font-extrabold text-base uppercase text-white tracking-wider">{displayText}</span>
-                ) : (
-                  <span className="text-xs text-[#5D6F68] font-mono italic">— no answer —</span>
-                )}
+              <div className="flex-1 min-h-0 w-full flex items-center justify-center overflow-hidden">
+                <div
+                  style={{
+                    aspectRatio: '1000 / 360',
+                    maxHeight: '100%',
+                    maxWidth: '100%'
+                  }}
+                  className="w-full h-full bg-[#121916] rounded-xl border border-[#25332C] overflow-hidden flex items-center justify-center p-2 relative shadow-[inset_0_2px_8px_rgba(0,0,0,0.6)]"
+                >
+                  {displayInk && displayInk.s && displayInk.s.length > 0 ? (
+                    <InkSvg ink={displayInk} strokeUnits={18} className="w-full h-full block text-white" />
+                  ) : displayText && displayText.trim() ? (
+                    <span className="font-extrabold text-base uppercase text-white tracking-wider">{displayText}</span>
+                  ) : (
+                    <span className="text-xs text-[#5D6F68] font-mono italic">— no answer —</span>
+                  )}
+                </div>
               </div>
             </div>
           </div>
