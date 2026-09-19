@@ -3,7 +3,7 @@ import { useSessionSocket } from '../hooks/useSessionSocket';
 import { InkCanvas } from '../components/ink/InkCanvas';
 import { InkSvg } from '../components/ink/InkSvg';
 import type { StrokeInk } from '@trivia/shared';
-import { CheckCircle2, ArrowUpRight, Sparkles, Smartphone, Maximize2, Minimize2 } from 'lucide-react';
+import { CheckCircle2, ArrowUpRight, Sparkles, Smartphone, Maximize2, Minimize2, X } from 'lucide-react';
 
 export const PlayRoute: React.FC = () => {
   // Query parameters: ?code=123456
@@ -48,13 +48,31 @@ export const PlayRoute: React.FC = () => {
   // Time remaining percentage for timer bar
   const [timerPercent, setTimerPercent] = useState(100);
 
-  // Orientation state for forced landscape
+  // Feature detection for Fullscreen API (unsupported for DOM elements on iOS Safari)
+  const isFullscreenSupported = typeof document !== 'undefined' && Boolean(
+    (document.documentElement as any)?.requestFullscreen ||
+    (document.documentElement as any)?.webkitRequestFullscreen ||
+    (document.documentElement as any)?.msRequestFullscreen ||
+    document.fullscreenEnabled ||
+    (document as any).webkitFullscreenEnabled
+  );
+
+  // iOS device detection
+  const isIOS = typeof navigator !== 'undefined' && (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
+
+  // Orientation state for landscape
   const [isLandscape, setIsLandscape] = useState(() => {
     if (typeof window !== 'undefined') {
       return window.innerWidth >= window.innerHeight;
     }
     return true;
   });
+
+  // Allow user to proceed in portrait if they cannot/do not want to rotate
+  const [allowPortrait, setAllowPortrait] = useState(false);
 
   // Fullscreen state tracking
   const [isFullscreen, setIsFullscreen] = useState(() => {
@@ -65,6 +83,7 @@ export const PlayRoute: React.FC = () => {
   });
 
   const requestFullscreen = async () => {
+    if (!isFullscreenSupported) return;
     try {
       const docEl = document.documentElement as any;
       if (docEl.requestFullscreen) {
@@ -100,14 +119,18 @@ export const PlayRoute: React.FC = () => {
 
   useEffect(() => {
     const handleOrientation = () => {
-      setIsLandscape(window.innerWidth >= window.innerHeight);
+      const landscape = window.innerWidth >= window.innerHeight;
+      setIsLandscape(landscape);
+      if (landscape) {
+        setAllowPortrait(false);
+      }
     };
 
     const updateFs = () => {
       setIsFullscreen(Boolean(document.fullscreenElement || (document as any).webkitFullscreenElement));
     };
 
-    // Attempt screen orientation lock if supported
+    // Attempt screen orientation lock only if supported
     try {
       if (screen.orientation && 'lock' in screen.orientation) {
         (screen.orientation as any).lock('landscape').catch(() => {});
@@ -206,7 +229,9 @@ export const PlayRoute: React.FC = () => {
     e.preventDefault();
     if (!code.trim() || !teamName.trim()) return;
     clearError();
-    requestFullscreen();
+    if (isFullscreenSupported) {
+      requestFullscreen();
+    }
     joinTeam(code.trim(), teamName.trim(), deviceToken);
   };
 
@@ -214,7 +239,9 @@ export const PlayRoute: React.FC = () => {
     e.preventDefault();
     if (!code.trim() || !teamName.trim() || !teamPin.trim()) return;
     clearError();
-    requestFullscreen();
+    if (isFullscreenSupported) {
+      requestFullscreen();
+    }
     rejoinTeam(code.trim(), teamName.trim(), teamPin.trim(), deviceToken);
   };
 
@@ -260,34 +287,19 @@ export const PlayRoute: React.FC = () => {
   // --- Render Unjoined State ---
   if (!isJoined) {
     return (
-      <div className="min-h-screen h-[100dvh] flex items-center justify-center p-4 bg-[#0E1311] text-[#E6ECE8] font-sans overflow-hidden">
-        {/* Force Landscape Prompt */}
-        {!isLandscape && (
-          <div className="fixed inset-0 z-50 bg-[#0C100E] text-[#E6ECE7] flex flex-col items-center justify-center p-6 text-center select-none animate-fade-in">
-            <div className="w-16 h-16 rounded-2xl bg-[#172D24] border border-[#2EA572]/40 text-[#42DB99] flex items-center justify-center mb-4 animate-pulse">
-              <Smartphone size={34} className="rotate-90 transition-transform" />
-            </div>
-            <h2 className="text-xl font-bold mb-1.5 text-white">Rotate to Landscape</h2>
-            <p className="text-xs text-[#8A9F97] max-w-xs leading-relaxed mb-4">
-              Turn your phone sideways to landscape mode for the chalkboard whiteboard.
-            </p>
-            <button
-              type="button"
-              onClick={requestFullscreen}
-              className="px-4 py-2 bg-[#238B5E] hover:bg-[#1C754E] text-white rounded-xl text-xs font-bold shadow transition-all flex items-center gap-1.5"
-            >
-              <Maximize2 size={14} />
-              <span>Enter Fullscreen</span>
-            </button>
-          </div>
-        )}
-
+      <div className="min-h-screen h-[100dvh] flex items-center justify-center p-4 bg-[#0E1311] text-[#E6ECE8] font-sans overflow-y-auto">
         <div className="w-full max-w-md bg-[#18231F] border border-[#2B3A33] rounded-2xl p-5 shadow-2xl">
           <div className="flex items-center gap-2 mb-1">
             <span className="w-2.5 h-2.5 rounded-full bg-[#2EA572]"></span>
             <h1 className="font-bold text-base text-white">Trivia Night App</h1>
           </div>
-          <p className="text-xs text-[#8A9F97] mb-4">Enter event details to join the chalkboard.</p>
+          <p className="text-xs text-[#8A9F97] mb-3">Enter event details to join the chalkboard.</p>
+
+          {/* Orientation hint: Informative rather than blocking */}
+          <div className="mb-3.5 px-3 py-2 rounded-xl bg-[#121A17] border border-[#25332C] text-[11px] text-[#A2B5AD] flex items-center gap-2.5">
+            <Smartphone size={16} className="rotate-90 text-[#42DB99] flex-none" />
+            <span>Turn your phone sideways during the game for the best digital chalkboard experience.</span>
+          </div>
 
           {lastError && (
             <div className="mb-3 p-2.5 rounded-lg bg-[#341816] text-[#FFA399] border border-[#D2564A]/40 text-xs font-medium">
@@ -413,24 +425,80 @@ export const PlayRoute: React.FC = () => {
 
   return (
     <div className="min-h-screen h-[100dvh] bg-[#0E1311] text-[#E6ECE8] flex flex-col font-sans select-none overflow-hidden">
-      {/* Forced Landscape Lock Overlay */}
-      {!isLandscape && (
-        <div className="fixed inset-0 z-50 bg-[#0C100E] text-[#E6ECE7] flex flex-col items-center justify-center p-6 text-center select-none animate-fade-in">
+      {/* Landscape Guidance Modal (Only when in portrait and user hasn't chosen to continue in portrait) */}
+      {!isLandscape && !allowPortrait && (
+        <div className="fixed inset-0 z-50 bg-[#0C100E]/95 backdrop-blur-sm text-[#E6ECE7] flex flex-col items-center justify-center p-6 text-center select-none animate-fade-in">
+          {/* Close button to dismiss immediately */}
+          <button
+            type="button"
+            onClick={() => setAllowPortrait(true)}
+            className="absolute top-4 right-4 p-2 rounded-full bg-[#18231F] border border-[#2B3A33] text-[#8A9F97] hover:text-white transition-all"
+            title="Continue in portrait"
+          >
+            <X size={18} />
+          </button>
+
           <div className="w-16 h-16 rounded-2xl bg-[#172D24] border border-[#2EA572]/40 text-[#42DB99] flex items-center justify-center mb-4 animate-pulse">
             <Smartphone size={34} className="rotate-90 transition-transform" />
           </div>
+
           <h2 className="text-xl font-bold mb-1.5 text-white">Rotate to Landscape</h2>
-          <p className="text-xs text-[#8A9F97] max-w-xs leading-relaxed mb-4">
-            Please turn your phone sideways to landscape mode for the chalkboard whiteboard.
-          </p>
-          <button
-            type="button"
-            onClick={requestFullscreen}
-            className="px-4 py-2 bg-[#238B5E] hover:bg-[#1C754E] text-white rounded-xl text-xs font-bold shadow transition-all flex items-center gap-1.5"
-          >
-            <Maximize2 size={14} />
-            <span>Enter Fullscreen</span>
-          </button>
+
+          {isIOS ? (
+            <div className="max-w-xs text-xs text-[#8A9F97] leading-relaxed mb-5 space-y-2">
+              <p>
+                Turn your iPhone sideways for the wide chalkboard experience.
+              </p>
+              <div className="bg-[#141C19] border border-[#25332C] rounded-xl p-2.5 text-[11px] text-[#A2B5AD] text-left">
+                <span className="font-bold text-white block mb-0.5">⚠️ iPhone Tip:</span>
+                If your screen does not rotate, swipe down from the top right of your iPhone to turn off <b className="text-white">Portrait Orientation Lock</b> in Control Center.
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-[#8A9F97] max-w-xs leading-relaxed mb-5">
+              Turn your phone sideways to landscape mode for the digital chalkboard.
+            </p>
+          )}
+
+          <div className="flex flex-col gap-2.5 w-full max-w-xs">
+            {isFullscreenSupported && (
+              <button
+                type="button"
+                onClick={requestFullscreen}
+                className="w-full py-2.5 bg-[#238B5E] hover:bg-[#1C754E] active:scale-[0.98] text-white rounded-xl text-xs font-bold shadow transition-all flex items-center justify-center gap-2"
+              >
+                <Maximize2 size={15} />
+                <span>Enter Fullscreen</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setAllowPortrait(true)}
+              className="w-full py-2 bg-[#1C2622] hover:bg-[#25332E] border border-[#2B3A33] text-[#A2B5AD] hover:text-white rounded-xl text-xs font-medium transition-all"
+            >
+              Continue in Portrait Mode
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Subtle Hint Bar when playing in Portrait mode */}
+      {!isLandscape && allowPortrait && (
+        <div className="bg-[#121A17] border-b border-[#25332C] px-3 py-1 flex items-center justify-between text-[11px] text-[#8A9F97] flex-none z-20">
+          <div className="flex items-center gap-1.5">
+            <Smartphone size={12} className="rotate-90 text-[#2EA572]" />
+            <span>Landscape mode gives a wider chalkboard</span>
+          </div>
+          {isFullscreenSupported && (
+            <button
+              type="button"
+              onClick={requestFullscreen}
+              className="text-[#42DB99] font-bold hover:underline ml-2"
+            >
+              Fullscreen
+            </button>
+          )}
         </div>
       )}
 
@@ -452,15 +520,17 @@ export const PlayRoute: React.FC = () => {
               {myTeam?.score ?? 0} pts
             </span>
 
-            {/* Fullscreen Toggle Button */}
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              className="p-1 rounded-lg border border-[#2B3A33] bg-[#18231F] text-[#8A9F97] hover:text-white hover:border-[#3E5249] transition-all ml-1"
-              title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
-            >
-              {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            </button>
+            {/* Fullscreen Toggle Button (Only on devices that support Fullscreen API) */}
+            {isFullscreenSupported && (
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                className="p-1 rounded-lg border border-[#2B3A33] bg-[#18231F] text-[#8A9F97] hover:text-white hover:border-[#3E5249] transition-all ml-1"
+                title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+              >
+                {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              </button>
+            )}
           </div>
         </div>
       </header>
