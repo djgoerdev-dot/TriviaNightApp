@@ -76,10 +76,6 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, [handleResize]);
 
-  useEffect(() => {
-    redraw();
-  }, [strokes, isLocked, redraw]);
-
   const emitInkChange = useCallback((updatedStrokes: Stroke[]) => {
     if (onStrokeChange) {
       onStrokeChange({
@@ -89,6 +85,25 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
       });
     }
   }, [onStrokeChange]);
+
+  useEffect(() => {
+    if (isLocked && activePointerIdRef.current !== null && currentStrokeRef.current) {
+      if (currentStrokeRef.current.p.length >= 2) {
+        const simplified = simplifyPoints(currentStrokeRef.current.p, 1.8);
+        const newStroke: Stroke = {
+          t: currentStrokeRef.current.t,
+          p: simplified
+        };
+        const updated = [...strokesRef.current, newStroke];
+        strokesRef.current = updated;
+        setStrokes(updated);
+        emitInkChange(updated);
+      }
+      activePointerIdRef.current = null;
+      currentStrokeRef.current = null;
+    }
+    redraw();
+  }, [strokes, isLocked, emitInkChange, redraw]);
 
   const toViewBoxCoords = (e: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
     const canvas = canvasRef.current;
@@ -208,12 +223,23 @@ export const InkCanvas: React.FC<InkCanvasProps> = ({
           </div>
         )}
 
-        {/* Frozen Lock Badge */}
-        {isLocked && (
+        {/* Lock Badges & Indicators */}
+        {isLocked && strokes.length > 0 && (
           <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#D9EDE5] text-[#1B7A5A] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
             <Lock size={13} />
             <span>Answer locked</span>
           </div>
+        )}
+
+        {isLocked && strokes.length === 0 && (
+          <>
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-[#8C9A93] text-sm md:text-base font-medium select-none italic">
+              — no answer recorded —
+            </div>
+            <div className="absolute top-3 right-3 flex items-center gap-1.5 px-3 py-1 bg-[#EFF2EE] text-[#5C6B64] border border-[#D2DACF] rounded-full text-xs font-bold uppercase tracking-wider shadow-sm animate-fade-in">
+              <span>No answer</span>
+            </div>
+          </>
         )}
       </div>
 

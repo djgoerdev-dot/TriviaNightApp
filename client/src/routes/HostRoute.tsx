@@ -501,9 +501,9 @@ export const HostRoute: React.FC = () => {
                         <div className="w-full aspect-[1000/360] bg-[#EFF2EE] rounded-lg border border-[#D2DACF] overflow-hidden flex items-center justify-center relative my-1">
                           {card.isHidden ? (
                             <span className="text-xs text-[#5C6B64] font-mono">[ HIDDEN ]</span>
-                          ) : card.answerInk ? (
+                          ) : (card.answerInk && card.answerInk.s && card.answerInk.s.length > 0) ? (
                             <InkSvg ink={card.answerInk} strokeUnits={18} />
-                          ) : card.answerRaw ? (
+                          ) : (card.answerRaw && card.answerRaw.trim()) ? (
                             <span className="font-bold text-sm uppercase">{card.answerRaw}</span>
                           ) : (
                             <span className="text-xs text-[#5C6B64] font-mono">— no answer —</span>

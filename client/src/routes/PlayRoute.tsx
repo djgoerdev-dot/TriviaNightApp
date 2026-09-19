@@ -166,7 +166,7 @@ export const PlayRoute: React.FC = () => {
   };
 
   const handleSubmitAnswer = () => {
-    if (!currentInk || !sessionState?.currentQuestion?.id || isSubmitted || isSubmitting) return;
+    if (!currentInk || !currentInk.s || currentInk.s.length === 0 || !sessionState?.currentQuestion?.id || isSubmitted || isSubmitting) return;
     clearError();
     const qId = sessionState.currentQuestion.id;
     setLockedInkMap(prev => ({ ...prev, [qId]: currentInk }));
@@ -178,12 +178,30 @@ export const PlayRoute: React.FC = () => {
     }
   };
 
+  // Auto-lock drawn strokes on question lock/timeout so whatever is on screen is locked in
+  useEffect(() => {
+    if (sessionState?.phase === 'QUESTION_LOCKED' && sessionState.currentQuestion?.id) {
+      if (!isSubmitted && !isSubmitting && currentInk && currentInk.s && currentInk.s.length > 0) {
+        clearError();
+        const qId = sessionState.currentQuestion.id;
+        setLockedInkMap(prev => ({ ...prev, [qId]: currentInk }));
+        setIsSubmitting(true);
+        submitAnswer(qId, currentInk);
+      }
+    }
+  }, [sessionState?.phase, sessionState?.currentQuestion?.id, currentInk, isSubmitted, isSubmitting, clearError, submitAnswer]);
+
   // Find team & card
   const myTeam = myTeamId ? sessionState?.teams.find(t => t.id === myTeamId) : undefined;
   const myCard = myTeamId ? boardCards.find(c => c.teamId === myTeamId) : undefined;
 
   const currentQId = sessionState?.currentQuestion?.id;
-  const displayInk = myCard?.answerInk || (currentQId ? lockedInkMap[currentQId] : null) || currentInk;
+  const rawCardInk = myCard?.answerInk;
+  const cardHasStrokes = rawCardInk && rawCardInk.s && rawCardInk.s.length > 0;
+  const lockedInk = currentQId ? lockedInkMap[currentQId] : null;
+  const lockedHasStrokes = lockedInk && lockedInk.s && lockedInk.s.length > 0;
+  const currentHasStrokes = currentInk && currentInk.s && currentInk.s.length > 0;
+  const displayInk = (cardHasStrokes ? rawCardInk : null) || (lockedHasStrokes ? lockedInk : null) || (currentHasStrokes ? currentInk : null);
   const displayText = myCard?.answerRaw;
 
   // --- Render Unjoined State ---
@@ -441,21 +459,27 @@ export const PlayRoute: React.FC = () => {
 
               {/* Submission Controls */}
               <div className="mt-3 pt-2 border-t border-[#D2DACF]">
-                {!isSubmitted && phase === 'QUESTION_LIVE' && (
+                {!isSubmitted && !isSubmitting && phase === 'QUESTION_LIVE' && (
                   <button
                     type="button"
                     onClick={handleSubmitAnswer}
-                    disabled={!currentInk || currentInk.s.length === 0 || isSubmitting}
+                    disabled={!currentInk || !currentInk.s || currentInk.s.length === 0}
                     className="w-full py-2.5 bg-[#1B7A5A] hover:bg-[#146046] active:scale-[0.99] text-white rounded-xl font-bold text-xs md:text-sm shadow transition-all disabled:opacity-40 disabled:pointer-events-none"
                   >
-                    {isSubmitting ? 'Sending…' : 'Lock it in'}
+                    Lock it in
                   </button>
                 )}
 
-                {isSubmitted && (
+                {(isSubmitted || isSubmitting) && (
                   <div className="p-2 bg-[#D9EDE5] border border-[#1B7A5A]/30 rounded-xl text-center text-xs font-bold text-[#1B7A5A] flex items-center justify-center gap-1.5 animate-fade-in">
                     <CheckCircle2 size={15} />
-                    <span>Answer locked in</span>
+                    <span>{isSubmitting ? 'Locking in…' : 'Answer locked in'}</span>
+                  </div>
+                )}
+
+                {!isSubmitted && !isSubmitting && phase === 'QUESTION_LOCKED' && (
+                  <div className="p-2 bg-[#EFF2EE] border border-[#D2DACF] rounded-xl text-center text-xs font-semibold text-[#5C6B64] flex items-center justify-center gap-1.5 animate-fade-in">
+                    <span>— No answer recorded —</span>
                   </div>
                 )}
               </div>
@@ -520,9 +544,9 @@ export const PlayRoute: React.FC = () => {
 
               {/* Vector Ink Drawing */}
               <div className="flex-1 w-full aspect-[1000/360] bg-[#EFF2EE] rounded-xl border border-[#D2DACF] overflow-hidden flex items-center justify-center p-2 relative shadow-inner">
-                {displayInk ? (
+                {displayInk && displayInk.s && displayInk.s.length > 0 ? (
                   <InkSvg ink={displayInk} strokeUnits={18} />
-                ) : displayText ? (
+                ) : displayText && displayText.trim() ? (
                   <span className="font-extrabold text-base uppercase text-[#14181A]">{displayText}</span>
                 ) : (
                   <span className="text-xs text-[#5C6B64] font-medium">— no answer —</span>

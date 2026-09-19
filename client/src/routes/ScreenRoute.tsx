@@ -334,9 +334,9 @@ export const ScreenRoute: React.FC = () => {
                         />
                       ) : card.isHidden ? (
                         <div className={`text-xs font-mono uppercase ${mutedClass}`}>[ Hidden by Host ]</div>
-                      ) : card.answerInk ? (
+                      ) : (card.answerInk && card.answerInk.s && card.answerInk.s.length > 0) ? (
                         <InkSvg ink={card.answerInk} strokeUnits={inkStrokeUnits} />
-                      ) : card.answerRaw ? (
+                      ) : (card.answerRaw && card.answerRaw.trim()) ? (
                         <span className="font-bold text-lg uppercase truncate">{card.answerRaw}</span>
                       ) : (
                         <span className={`text-xs font-mono ${mutedClass}`}>— no answer —</span>

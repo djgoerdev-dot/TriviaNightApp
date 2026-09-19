@@ -468,14 +468,19 @@ export class LiveSession {
     const sub = this.ensureSubmission(targetId, teamId);
     if (!sub) return { accepted: false, reason: 'Team is not registered in this session' };
 
-    sub.answerInk = ink || null;
-    sub.answerRaw = text || null;
+    const hasInk = Boolean(ink && ink.s && ink.s.length > 0);
+    const hasText = Boolean(text && text.trim().length > 0);
+
+    sub.answerInk = hasInk ? ink! : null;
+    sub.answerRaw = hasText ? text!.trim() : null;
     sub.submittedAt = now;
     sub.teamName = team.name;
     sub.isHidden = false;
     // A grace-window answer arrives after lock() pre-marked the blank card
-    // incorrect; hand it back to the host unmarked.
-    sub.isCorrect = null;
+    // incorrect; hand it back to the host unmarked if it contains an answer.
+    if (hasInk || hasText) {
+      sub.isCorrect = null;
+    }
 
     this.persistSubmissions([sub]);
     this.onStateChange();
