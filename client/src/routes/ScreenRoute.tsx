@@ -6,7 +6,9 @@ import { calculateStrokeUnits } from '../components/ink/ink-utils';
 import type { Submission } from '@trivia/shared';
 import { Trophy, Maximize2, X } from 'lucide-react';
 
-const SHORTCUT_KEYS = '123456789QWERTYUIOPASDFGHJKLZXCVBNM'.split('');
+// Must stay identical to the host console's list, or the key printed on a
+// card here would not be the key that toggles it there.
+const SHORTCUT_KEYS = '123456789QWERTYUIOPSDFGHJKLXVBNM'.split('');
 
 export const ScreenRoute: React.FC = () => {
   const params = new URLSearchParams(window.location.search);
@@ -14,14 +16,27 @@ export const ScreenRoute: React.FC = () => {
 
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [strokeWeight, setStrokeWeight] = useState<number>(5.0);
+
+  // Target on-screen ink thickness in CSS pixels. Tuned per venue with [ and ]
+  // and remembered per projector.
+  const [strokeWeight, setStrokeWeight] = useState<number>(() => {
+    try {
+      const saved = parseFloat(localStorage.getItem('trivia.strokeWeight') || '');
+      return Number.isFinite(saved) && saved >= 2 && saved <= 11 ? saved : 5;
+    } catch {
+      return 5;
+    }
+  });
+  const [weightToast, setWeightToast] = useState(false);
+
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const [cardInkWidth, setCardInkWidth] = useState(0);
 
   const {
     sessionState,
     boardCards,
     spotlightTeamId,
-    isConnected,
-    hostSpotlight
+    isConnected
   } = useSessionSocket({
     role: 'screen',
     code,
@@ -43,24 +58,66 @@ export const ScreenRoute: React.FC = () => {
     }
   }, [code, theme]);
 
-  // Keyboard navigation on big screen for AV tech / co-host
+  // The projector is output only: it no longer sends host commands (the
+  // server refuses them from a screen socket). Fullscreen and ink weight are
+  // purely local display concerns.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toUpperCase();
-      if (key === 'ESCAPE') {
-        hostSpotlight(null);
-      } else if (key === 'F') {
+
+      if (key === 'F') {
         if (!document.fullscreenElement) {
           document.documentElement.requestFullscreen().catch(() => {});
         } else {
           document.exitFullscreen().catch(() => {});
         }
+        return;
+      }
+
+      if (e.key === '[' || e.key === ']') {
+        setStrokeWeight(prev => {
+          const next = Math.min(11, Math.max(2, prev + (e.key === ']' ? 0.5 : -0.5)));
+          try { localStorage.setItem('trivia.strokeWeight', String(next)); } catch { /* ignore */ }
+          return next;
+        });
+        setWeightToast(true);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [hostSpotlight]);
+  }, []);
+
+  // Hide the weight readout shortly after the last adjustment.
+  useEffect(() => {
+    if (!weightToast) return;
+    const t = setTimeout(() => setWeightToast(false), 1600);
+    return () => clearTimeout(t);
+  }, [weightToast, strokeWeight]);
+
+  // Measure a real card so ink thickens as the grid gets denser: at 24 teams
+  // the cards are ~280px wide against ~420px at 16, and a fixed viewBox stroke
+  // would render proportionally thinner exactly where it is hardest to read.
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) {
+      setCardInkWidth(0);
+      return;
+    }
+    const measure = () => {
+      const box = el.querySelector('[data-inkbox]') as HTMLElement | null;
+      setCardInkWidth(box ? box.getBoundingClientRect().width : 0);
+    };
+    measure();
+
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener('resize', measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [sessionState?.phase, boardCards.length]);
 
   const phase = sessionState?.phase || 'LOBBY';
   const teams = sessionState?.teams || [];
@@ -76,6 +133,14 @@ export const ScreenRoute: React.FC = () => {
 
   // Find spotlighted submission if any
   const spotlightCard = spotlightTeamId ? boardCards.find(c => c.teamId === spotlightTeamId) : null;
+
+  // Ink thickness in viewBox units, derived from the measured card width so
+  // the rendered line lands at `strokeWeight` CSS pixels at any grid density.
+  const inkStrokeUnits = calculateStrokeUnits(strokeWeight, cardInkWidth);
+  const spotlightStrokeUnits = calculateStrokeUnits(
+    strokeWeight,
+    typeof window !== 'undefined' ? window.innerWidth * 0.9 : 0
+  );
 
   return (
     <div className={`w-screen h-screen overflow-hidden flex flex-col ${bgClass} select-none relative font-sans`}>
@@ -229,7 +294,7 @@ export const ScreenRoute: React.FC = () => {
             </div>
 
             {/* The 16–24 Team Cards Grid */}
-            <div className={`flex-1 grid ${gridCols} gap-3 min-h-0`}>
+            <div ref={gridRef} className={`flex-1 grid ${gridCols} gap-3 min-h-0`}>
               {boardCards.map((card, idx) => {
                 const keyShortcut = SHORTCUT_KEYS[idx] || '';
                 const isRevealed = phase === 'BOARD_CARDS';
@@ -247,8 +312,7 @@ export const ScreenRoute: React.FC = () => {
                 return (
                   <div
                     key={card.teamId}
-                    onClick={() => hostSpotlight(card.teamId)}
-                    className={`relative rounded-xl border ${cardBorderClass} p-3 flex flex-col justify-between cursor-pointer transition-all ${cardStatusClass} ${
+                    className={`relative rounded-xl border ${cardBorderClass} p-3 flex flex-col justify-between transition-all ${cardStatusClass} ${
                       isDark ? 'bg-[#171C1A]' : 'bg-white shadow-sm'
                     }`}
                   >
@@ -259,7 +323,7 @@ export const ScreenRoute: React.FC = () => {
                     </div>
 
                     {/* Card Answer Content */}
-                    <div className="flex-1 w-full flex items-center justify-center overflow-hidden min-h-0 relative">
+                    <div data-inkbox className="flex-1 w-full flex items-center justify-center overflow-hidden min-h-0 relative">
                       {!isRevealed ? (
                         // Stage 1: Face-down ruled whiteboard placeholder
                         <div
@@ -271,7 +335,7 @@ export const ScreenRoute: React.FC = () => {
                       ) : card.isHidden ? (
                         <div className={`text-xs font-mono uppercase ${mutedClass}`}>[ Hidden by Host ]</div>
                       ) : card.answerInk ? (
-                        <InkSvg ink={card.answerInk} strokeUnits={18} />
+                        <InkSvg ink={card.answerInk} strokeUnits={inkStrokeUnits} />
                       ) : card.answerRaw ? (
                         <span className="font-bold text-lg uppercase truncate">{card.answerRaw}</span>
                       ) : (
@@ -331,28 +395,33 @@ export const ScreenRoute: React.FC = () => {
         )}
       </div>
 
+      {/* Transient ink-weight readout — [ and ] tune it for the room. */}
+      {weightToast && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-black/70 text-white font-mono text-sm tracking-wide">
+          ink {strokeWeight.toFixed(1)}px
+          {cardInkWidth > 0 && <span className="opacity-60"> · card {Math.round(cardInkWidth)}px</span>}
+        </div>
+      )}
+
       {/* --- FULLSCREEN SPOTLIGHT OVERLAY --- */}
       {spotlightCard && (
-        <div
-          onClick={() => hostSpotlight(null)}
-          className="absolute inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col p-12 text-white cursor-pointer animate-fade-in"
-        >
+        <div className="absolute inset-0 z-50 bg-black/95 backdrop-blur-md flex flex-col p-12 text-white animate-fade-in">
           <div className="flex items-center justify-between mb-6">
             <div>
               <span className="text-xs font-bold uppercase tracking-widest text-[#1B7A5A]">Spotlight Review</span>
               <h2 className="text-3xl font-extrabold">{spotlightCard.teamName}</h2>
             </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); hostSpotlight(null); }}
-              className="p-3 bg-white/10 hover:bg-white/20 rounded-full text-white"
-            >
-              <X size={28} />
-            </button>
+            {/* Dismissed from the host console — the projector never drives
+                session state. */}
+            <span className="px-3 py-1.5 rounded-full bg-white/10 text-xs font-semibold uppercase tracking-wider">
+              <X size={14} className="inline mr-1.5 -mt-0.5" />
+              Close from host console
+            </span>
           </div>
 
           <div className="flex-1 flex items-center justify-center p-8 bg-[#171C1A] border border-white/10 rounded-3xl overflow-hidden">
             {spotlightCard.answerInk ? (
-              <InkSvg ink={spotlightCard.answerInk} strokeUnits={10} className="w-full h-full max-h-[80vh]" />
+              <InkSvg ink={spotlightCard.answerInk} strokeUnits={spotlightStrokeUnits} className="w-full h-full max-h-[80vh]" />
             ) : (
               <span className="text-2xl text-gray-500 font-mono">— no answer —</span>
             )}

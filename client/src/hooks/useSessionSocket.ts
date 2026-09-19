@@ -4,15 +4,33 @@ import type {
   Submission,
   ServerMessage,
   ClientMessage,
+  ClientRole,
   StrokeInk
 } from '@trivia/shared';
 
 interface UseSessionSocketOptions {
-  role: 'host' | 'screen' | 'team';
+  role: ClientRole;
   code?: string;
   hostToken?: string;
   autoConnect?: boolean;
 }
+
+export interface RegisteredTeam {
+  id: string;
+  name: string;
+  pin: string;
+  token: string;
+}
+
+export interface AnswerAck {
+  questionId: string;
+  accepted: boolean;
+  reason?: string;
+  at: number;
+}
+
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
 
 export function useSessionSocket({
   role,
@@ -25,185 +43,236 @@ export function useSessionSocket({
   const [spotlightTeamId, setSpotlightTeamId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  // State, not a ref: a component has to re-render when registration lands,
+  // and the server-corrected team name arrives with it.
+  const [registeredTeam, setRegisteredTeam] = useState<RegisteredTeam | null>(null);
+  const [answerAck, setAnswerAck] = useState<AnswerAck | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const registeredTeamRef = useRef<{ id: string; name: string; pin: string; token: string } | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptsRef = useRef(0);
+  const closedByUsRef = useRef(false);
+
+  // The handshake to (re)send whenever a socket opens. Holding it in a ref is
+  // what keeps the connection independent of the code input: typing in the
+  // join field no longer tears the socket down and rebuilds it per keystroke.
+  const handshakeRef = useRef<ClientMessage | null>(null);
+
+  // serverTime - Date.now(), so a phone with a skewed clock still counts down
+  // against the server's idea of when the question closes.
+  const clockOffsetRef = useRef(0);
 
   const getWsUrl = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // In Vite dev proxy or production
-    const host = window.location.host;
-    return `${protocol}//${host}/ws`;
+    return `${protocol}//${window.location.host}/ws`;
   };
 
-  const send = useCallback((msg: ClientMessage) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
+  const rawSend = useCallback((msg: ClientMessage) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+      return true;
     }
+    return false;
   }, []);
 
   const connect = useCallback(() => {
-    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+    const existing = wsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
+    let socket: WebSocket;
     try {
-      const socket = new WebSocket(getWsUrl());
-      wsRef.current = socket;
-
-      socket.onopen = () => {
-        setIsConnected(true);
-        setLastError(null);
-
-        // Send role-specific handshake
-        if (role === 'screen' && code) {
-          socket.send(JSON.stringify({ type: 'screen.listen', payload: { code } }));
-        } else if (role === 'host' && (hostToken || code)) {
-          socket.send(JSON.stringify({ type: 'host.auth', payload: { token: hostToken || code } }));
-        } else if (role === 'team' && registeredTeamRef.current && code) {
-          // Re-associate on reconnect
-          socket.send(JSON.stringify({
-            type: 'rejoin',
-            payload: {
-              code,
-              teamName: registeredTeamRef.current.name,
-              teamPin: registeredTeamRef.current.pin,
-              deviceToken: registeredTeamRef.current.token
-            }
-          }));
-        }
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const msg: ServerMessage = JSON.parse(event.data);
-
-          switch (msg.type) {
-            case 'session.state':
-              setSessionState(msg.payload);
-              setSpotlightTeamId(msg.payload.spotlightTeamId || null);
-              break;
-
-            case 'board.cards':
-              setBoardCards(msg.payload.submissions);
-              break;
-
-            case 'board.mark':
-              setBoardCards(prev =>
-                prev.map(card =>
-                  card.teamId === msg.payload.teamId
-                    ? { ...card, isCorrect: msg.payload.isCorrect }
-                    : card
-                )
-              );
-              break;
-
-            case 'board.spotlight':
-              setSpotlightTeamId(msg.payload.teamId);
-              break;
-
-            case 'team.registered':
-              registeredTeamRef.current = {
-                id: msg.payload.teamId,
-                name: msg.payload.teamName,
-                pin: msg.payload.teamPin,
-                token: msg.payload.deviceToken
-              };
-              try {
-                localStorage.setItem('trivia.deviceToken', msg.payload.deviceToken);
-                localStorage.setItem('trivia.teamPin', msg.payload.teamPin);
-                localStorage.setItem('trivia.teamName', msg.payload.teamName);
-              } catch (_) {}
-              break;
-
-            case 'error':
-              setLastError(msg.payload.message);
-              break;
-
-            default:
-              break;
-          }
-        } catch (err) {
-          console.error('[WS Hook] Malformed message', err);
-        }
-      };
-
-      socket.onclose = () => {
-        setIsConnected(false);
-        // Automatic reconnect after 2 seconds
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
-        }, 2000);
-      };
-
-      socket.onerror = () => {
-        setIsConnected(false);
-      };
+      socket = new WebSocket(getWsUrl());
     } catch (err: any) {
-      setLastError(err.message || 'Connection failed');
+      setLastError(err?.message || 'Connection failed');
+      return;
     }
-  }, [role, code, hostToken]);
+    wsRef.current = socket;
 
-  useEffect(() => {
-    if (autoConnect) {
-      connect();
-    }
-    return () => {
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
+    socket.onopen = () => {
+      setIsConnected(true);
+      setLastError(null);
+      attemptsRef.current = 0;
+      if (handshakeRef.current) socket.send(JSON.stringify(handshakeRef.current));
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const msg: ServerMessage = JSON.parse(event.data);
+
+        switch (msg.type) {
+          case 'session.state':
+            clockOffsetRef.current = msg.payload.serverTime - Date.now();
+            setSessionState(msg.payload);
+            setSpotlightTeamId(msg.payload.spotlightTeamId || null);
+            break;
+
+          case 'board.cards':
+            setBoardCards(msg.payload.submissions);
+            break;
+
+          case 'board.mark':
+            setBoardCards(prev => prev.map(card =>
+              card.teamId === msg.payload.teamId
+                ? { ...card, isCorrect: msg.payload.isCorrect }
+                : card
+            ));
+            break;
+
+          case 'board.marks': {
+            const byTeam = new Map(msg.payload.marks.map(m => [m.teamId, m.isCorrect]));
+            setBoardCards(prev => prev.map(card =>
+              byTeam.has(card.teamId)
+                ? { ...card, isCorrect: byTeam.get(card.teamId)! }
+                : card
+            ));
+            break;
+          }
+
+          case 'board.spotlight':
+            setSpotlightTeamId(msg.payload.teamId);
+            break;
+
+          case 'answer.ack':
+            setAnswerAck({ ...msg.payload, at: Date.now() });
+            if (!msg.payload.accepted && msg.payload.reason) {
+              setLastError(msg.payload.reason);
+            }
+            break;
+
+          case 'team.registered': {
+            const team: RegisteredTeam = {
+              id: msg.payload.teamId,
+              name: msg.payload.teamName,
+              pin: msg.payload.teamPin,
+              token: msg.payload.deviceToken
+            };
+            setRegisteredTeam(team);
+            setLastError(null);
+
+            // Reconnects go through rejoin, which is validated by name + PIN.
+            handshakeRef.current = {
+              type: 'rejoin',
+              payload: {
+                code: (handshakeRef.current?.payload as any)?.code || code || '',
+                teamName: team.name,
+                teamPin: team.pin,
+                deviceToken: team.token
+              }
+            };
+
+            try {
+              localStorage.setItem('trivia.deviceToken', team.token);
+              localStorage.setItem('trivia.teamPin', team.pin);
+              localStorage.setItem('trivia.teamName', team.name);
+            } catch { /* private mode */ }
+            break;
+          }
+
+          case 'error':
+            setLastError(msg.payload.message);
+            break;
+
+          default:
+            break;
+        }
+      } catch (err) {
+        console.error('[WS Hook] Malformed message', err);
       }
     };
-  }, [autoConnect, connect]);
 
-  // Client actions
+    socket.onclose = () => {
+      setIsConnected(false);
+      if (closedByUsRef.current) return;
+
+      // Exponential backoff, so a server that is down is not hammered every 2s
+      // by every phone in the room.
+      const attempt = attemptsRef.current++;
+      const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt), RECONNECT_MAX_MS);
+      const jittered = delay * (0.7 + Math.random() * 0.6);
+
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = setTimeout(connect, jittered);
+    };
+
+    socket.onerror = () => setIsConnected(false);
+  }, [code]);
+
+  // The socket itself depends only on whether we should be connected at all.
+  useEffect(() => {
+    if (!autoConnect) return;
+    closedByUsRef.current = false;
+    connect();
+
+    return () => {
+      closedByUsRef.current = true;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoConnect]);
+
+  // Screen and host handshakes follow their props; a team's is set by joining.
+  useEffect(() => {
+    if (role === 'screen' && code) {
+      handshakeRef.current = { type: 'screen.listen', payload: { code } };
+      rawSend(handshakeRef.current);
+    } else if (role === 'host' && hostToken && code) {
+      handshakeRef.current = { type: 'host.auth', payload: { token: hostToken, code } };
+      rawSend(handshakeRef.current);
+    }
+  }, [role, code, hostToken, rawSend, isConnected]);
+
+  /** Server-corrected wall clock. */
+  const serverNow = useCallback(() => Date.now() + clockOffsetRef.current, []);
+
+  // --- Team actions ---
   const joinTeam = useCallback((joinCode: string, teamName: string, deviceToken?: string) => {
-    send({
-      type: 'join',
-      payload: { code: joinCode, teamName, deviceToken }
-    });
-  }, [send]);
+    handshakeRef.current = { type: 'join', payload: { code: joinCode, teamName, deviceToken } };
+    rawSend(handshakeRef.current);
+  }, [rawSend]);
 
   const rejoinTeam = useCallback((joinCode: string, teamName: string, teamPin: string, deviceToken?: string) => {
-    send({
-      type: 'rejoin',
-      payload: { code: joinCode, teamName, teamPin, deviceToken }
-    });
-  }, [send]);
+    handshakeRef.current = { type: 'rejoin', payload: { code: joinCode, teamName, teamPin, deviceToken } };
+    rawSend(handshakeRef.current);
+  }, [rawSend]);
 
   const submitAnswer = useCallback((questionId: string, ink?: StrokeInk, text?: string) => {
-    send({
-      type: 'answer.submit',
-      payload: { questionId, ink, text }
-    });
-  }, [send]);
+    return rawSend({ type: 'answer.submit', payload: { questionId, ink, text } });
+  }, [rawSend]);
 
-  // Host actions
-  const hostStart = useCallback(() => send({ type: 'host.start' }), [send]);
-  const hostNextPhase = useCallback(() => send({ type: 'host.next_phase' }), [send]);
-  const hostPrevPhase = useCallback(() => send({ type: 'host.prev_phase' }), [send]);
-  const hostLockQuestion = useCallback(() => send({ type: 'host.lock_question' }), [send]);
-  const hostBoardRevealCards = useCallback(() => send({ type: 'host.board_reveal_cards' }), [send]);
+  const clearError = useCallback(() => setLastError(null), []);
+
+  // --- Host actions ---
+  const hostStart = useCallback(() => rawSend({ type: 'host.start' }), [rawSend]);
+  const hostNextPhase = useCallback(() => rawSend({ type: 'host.next_phase' }), [rawSend]);
+  const hostPrevPhase = useCallback(() => rawSend({ type: 'host.prev_phase' }), [rawSend]);
+  const hostLockQuestion = useCallback(() => rawSend({ type: 'host.lock_question' }), [rawSend]);
+  const hostBoardRevealCards = useCallback(() => rawSend({ type: 'host.board_reveal_cards' }), [rawSend]);
   const hostMark = useCallback((teamId: string, isCorrect: boolean | null) => {
-    send({ type: 'host.mark', payload: { teamId, isCorrect } });
-  }, [send]);
+    rawSend({ type: 'host.mark', payload: { teamId, isCorrect } });
+  }, [rawSend]);
   const hostMarkAll = useCallback((mark: 'correct' | 'wrong' | 'clear') => {
-    send({ type: 'host.mark_all', payload: { mark } });
-  }, [send]);
+    rawSend({ type: 'host.mark_all', payload: { mark } });
+  }, [rawSend]);
   const hostToggleHide = useCallback((teamId: string) => {
-    send({ type: 'host.toggle_hide_card', payload: { teamId } });
-  }, [send]);
+    rawSend({ type: 'host.toggle_hide_card', payload: { teamId } });
+  }, [rawSend]);
   const hostSpotlight = useCallback((teamId: string | null) => {
-    send({ type: 'host.spotlight', payload: { teamId } });
-  }, [send]);
+    rawSend({ type: 'host.spotlight', payload: { teamId } });
+  }, [rawSend]);
   const hostAdjustScore = useCallback((teamId: string, deltaPoints: number, reason: string) => {
-    send({ type: 'host.adjust_score', payload: { teamId, deltaPoints, reason } });
-  }, [send]);
+    rawSend({ type: 'host.adjust_score', payload: { teamId, deltaPoints, reason } });
+  }, [rawSend]);
   const hostRenameTeam = useCallback((teamId: string, newName: string) => {
-    send({ type: 'host.rename_team', payload: { teamId, newName } });
-  }, [send]);
+    rawSend({ type: 'host.rename_team', payload: { teamId, newName } });
+  }, [rawSend]);
 
   return {
     isConnected,
@@ -211,7 +280,10 @@ export function useSessionSocket({
     boardCards,
     spotlightTeamId,
     lastError,
-    registeredTeam: registeredTeamRef.current,
+    clearError,
+    registeredTeam,
+    answerAck,
+    serverNow,
     joinTeam,
     rejoinTeam,
     submitAnswer,

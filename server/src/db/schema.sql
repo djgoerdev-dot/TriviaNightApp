@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   phase TEXT NOT NULL DEFAULT 'DRAFT',
   current_category_id TEXT,
   current_question_id TEXT,
+  current_category_index INTEGER NOT NULL DEFAULT 0,
+  current_question_index INTEGER NOT NULL DEFAULT 0,
   question_ends_at INTEGER,
   spotlight_team_id TEXT,
   started_at INTEGER,

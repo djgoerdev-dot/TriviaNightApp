@@ -2,11 +2,11 @@
 
 A system for running live trivia events where the host authors questions ahead of time and
 teams **write their answers on a phone with a finger**, exactly as they write on a
-whiteboard now. At the end of each category the handwritten answers go up on the big screen
-and the host marks every one by hand. The app replaces the whiteboards and the tally sheet,
-not the judgement.
+whiteboard now. After every question the handwritten answers go up on the big screen and the
+host marks each one by hand. The app replaces the whiteboards and the tally sheet, not the
+judgement.
 
-**Status:** design draft, rev 3 — 2026-09-19
+**Status:** design draft, rev 4 — 2026-09-19
 **Author:** philip.nis@nwtf.org.ph
 
 ---
@@ -56,21 +56,31 @@ LOBBY
   └ teams scan QR → enter 6-digit code → nominate team name → wait
 
 CATEGORY: "Philippine History"           ← intro card on the big screen
-  ├ Q1  question on phones + big screen · 15s · team writes answer · locked
-  ├ Q2  ...          (up to 8)
   │
-  └ ANSWER BOARD — per question, in this order:
-      ① CORRECT ANSWER fills the big screen, alone
-      ② host toggles → all 16–24 handwritten answers appear
-      ③ host marks each ✓ / ✗ — cards flip live on the projector
-      ④ confirm → next question
+  ├ Q1  question on phones + big screen · 15s · team writes answer · locked
+  │  └ ANSWER BOARD, in this order:
+  │      ① correct answer in the header, cards up but face-down
+  │      ② host reveals → all 16–24 handwritten answers appear at once
+  │      ③ host marks each ✓ / ✗ — cards flip live on the projector
+  │      ④ confirm → the next question opens
+  │
+  ├ Q2  … and so on, up to 8 questions, each with its own board
+  │
   └ CATEGORY SCORES → running leaderboard
 
 CATEGORY: "Movies"  →  ... → FINAL LEADERBOARD
 ```
 
-Nothing is revealed during a category. Teams find out how they did only when the board goes
-up — which preserves the suspense you already have, and means nothing leaks mid-category.
+**One question, one board.** A question closes, its answer goes up, everyone's handwriting is
+revealed and marked, and only then does the next question open. Teams find out how they did
+straight away rather than waiting out a whole category.
+
+The trade is pacing against suspense, and it favours pacing. Eight questions then eight
+boards makes the room sit through a long unbroken marking block at the end of every category,
+and by the seventh board nobody remembers what they wrote for question two. Marking right
+after the question is asked keeps each board short, keeps the answer fresh, and gives the
+night a steady rhythm of small payoffs instead of one long one. Nothing is lost on integrity:
+the question is already closed and locked before its answer is shown.
 
 ---
 
@@ -190,7 +200,10 @@ different from ink, which is fine — nobody's confused about which is which.
 2. **Host reveals.** Every team's handwriting appears at once, across the whole grid. This is
    the raise-your-boards moment, and it wants to be simultaneous.
 3. **Host marks.** Each tap flips a card green or red on the projector, live.
-4. **Confirm**, scores commit, next question.
+4. **Confirm**, scores commit, and the next question opens straight away.
+
+The board belongs to the question that just closed, and runs after every question rather than
+being batched to the end of a category.
 
 The correct answer does not get a full-screen splash of its own. It's a line under the
 question, where it stays visible for the whole marking pass — the host is reading it
@@ -289,9 +302,14 @@ marks into roughly **300–450 keystrokes** across the whole night. That is the 
 between workable and unworkable, so it belongs in Milestone 1, not as a later optimization.
 
 **Rough runtime for a full 9 × 8 event:** ~25 s per question live (read it, 15 s timer, lock),
-~20 s per question on the board (reveal, toggle, mark, confirm), plus banter — about 8–10
-minutes per category, so **75–90 minutes** for a maximum night. Worth knowing before you
-author 72 questions.
+~20 s on its board (reveal, mark, confirm), plus banter — about 8–10 minutes per category, so
+**75–90 minutes** for a maximum night. Worth knowing before you author 72 questions.
+
+Running the board after every question doesn't change that total — the same 72 boards happen
+either way. What changes is the shape: 45-second beats spread through the category instead of
+a five-minute marking block at the end of it. That's easier on the room and easier on you,
+since you are marking an answer the room heard fifteen seconds ago rather than one from eight
+questions back.
 
 ### Corrections
 Scores are an **append-only ledger** — a mark, a host adjustment, a tiebreak award — never a
@@ -398,22 +416,32 @@ and the format doesn't want them.
 The server owns the state. Clients render what they're told; they never decide.
 
 ```
- DRAFT → LOBBY ─┬─► CATEGORY_INTRO
-                │        ↓
-                │   QUESTION_LIVE     (timer running, phones writing)
+ DRAFT → LOBBY ──► CATEGORY_INTRO
+                        ↓
+                ┌─► QUESTION_LIVE     (timer running, phones writing)
                 │        ↓            (timer ends, or host locks)
-                │   QUESTION_LOCKED   ← loop up to 8 times
-                │        ↓
-                │   BOARD_ANSWER      (correct answer alone on screen)
-                │        ↓            (host toggles)
+                │   QUESTION_LOCKED
+                │        ↓            (host opens the board)
+                │   BOARD_ANSWER      (answer in the header, cards face-down)
+                │        ↓            (host reveals)
                 │   BOARD_CARDS       (handwriting up, host marks)
-                │        ↓            (host confirms) ← loop per question
-                │   CATEGORY_SCORES
-                │        ↓
-                └────────┴──► next category ... → FINISHED
+                │        ↓            (host confirms)
+                └──── next question in category
+                         │
+                         └─ after the last one → CATEGORY_SCORES
+                                                     ↓
+                                    next category ... → FINISHED
 
             PAUSED — reachable from any state
 ```
+
+**One board per question.** `BOARD_ANSWER` and `BOARD_CARDS` always belong to the question
+that just locked, so there is no separate board cursor to keep in step with the question
+cursor — `currentQuestionIndex` is the only position the session tracks inside a category.
+
+**`prevPhase` walks the cycle backwards**, so a host who needs to fix a mark can step back
+through `BOARD_CARDS → BOARD_ANSWER → QUESTION_LOCKED` and then into the *previous* question's
+board, rather than re-opening a timer that has already closed.
 
 **The timer is server-authoritative.** The server stores `question_ends_at` as an absolute
 timestamp; clients count down against a clock offset measured at join, so a phone that sleeps
@@ -490,7 +518,9 @@ Proportionate measures for a friendly event — not a proctoring system.
 
 - **Short timers are the real defence.** Fifteen seconds is not enough to search, especially
   with a team talking over each other and one person writing.
-- **Deferred marking leaks nothing** — no answer is revealed until the end of a category.
+- **An answer is only revealed once its question is closed.** Submissions lock before the
+  board opens, so there is never a window where the answer is visible and the question is
+  still live.
 - **Handwriting is its own protection.** Writing an answer with a finger is slower than
   pasting one, and there's nothing to paste into.
 - **Randomize multiple-choice option order per team.**
@@ -499,6 +529,23 @@ Proportionate measures for a friendly event — not a proctoring system.
   the first.
 - **Rate-limit join attempts by IP.** Six digits is only a million combinations — throttle
   hard after a handful of failures, and expire the code when the session ends.
+
+### Role is a server-side fact
+
+The socket's role is decided by the server at handshake and checked on every command;
+nothing a client sends can promote it. Three rules follow, and they are what keep the
+join code from doubling as a master key:
+
+- **Host commands require a host token**, issued by a real password sign-in — never the
+  six-digit join code, which every contestant in the room has.
+- **A team's snapshot is redacted.** It carries no `correctAnswer` and nobody's `teamPin`,
+  so neither is readable from a phone's devtools while the timer runs. The screen receives
+  the correct answer only once the board is up.
+- **The big screen sends nothing.** It is output only: fullscreen and ink weight are local
+  display settings, and every state change — spotlight included — comes from the console.
+
+Authoring data carries every answer for the night, so the whole authoring API is host-only
+too. An open read there would hand out the answers before the event starts.
 
 Not doing: camera monitoring, full-screen lockdown, tab-blur snitching, fingerprinting.
 
@@ -655,5 +702,7 @@ whatever actually broke.
    committing to 24 as a real ceiling rather than a theoretical one.
 2. **Draw-on replay — on or off by default?** Striking the first time, slow by the ninth
    category.
-3. **Should the spotlight be reachable from the big screen's own keyboard**, in case you hand
-   the projector laptop to a co-host?
+3. ~~Should the spotlight be reachable from the big screen's own keyboard?~~ **Settled: no.**
+   The projector is output only — it holds no host credential, so anyone who could open the
+   screen URL could otherwise drive the board. Spotlight is a console control. The screen
+   keeps `F` for fullscreen and `[` / `]` to tune ink weight, both purely local.

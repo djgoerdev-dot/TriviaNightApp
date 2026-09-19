@@ -1,5 +1,8 @@
 export type AnswerMode = 'ink' | 'text';
 
+/** Which surface a socket is acting as. The server decides this, never the client. */
+export type ClientRole = 'host' | 'screen' | 'team';
+
 export type SessionPhase =
   | 'DRAFT'
   | 'LOBBY'
@@ -56,7 +59,12 @@ export interface Team {
   id: string;
   sessionId: string;
   name: string;
-  teamPin: string;
+  /**
+   * The 4-digit takeover credential. NEVER present in a snapshot sent to a
+   * team or to the big screen — only the host console receives it, and a team
+   * learns its own PIN once, from `team.registered`.
+   */
+  teamPin?: string;
   answerMode: AnswerMode;
   status: 'connected' | 'disconnected';
   score: number;
@@ -95,19 +103,27 @@ export interface LiveSessionState {
     type: QuestionType;
     prompt: string;
     options?: string[];
-    correctAnswer: string;
+    /**
+     * Only sent to the host, and to the big screen during the board phases.
+     * A team's snapshot never carries it — the answer must not be readable
+     * from a contestant's device while the timer is running.
+     */
+    correctAnswer?: string;
     points: number;
     timeLimitSeconds: number;
     position: number;
   } | null;
   questionEndsAt?: number | null; // epoch ms
+  /** While set, late submissions for `graceQuestionId` are still accepted. */
+  graceUntil?: number | null;
   spotlightTeamId?: string | null;
   answerCount: {
     answered: number;
+    connected: number;
     total: number;
   };
   teams: Team[];
-  serverTime: number; // epoch ms for clock offset synchronization
+  serverTime: number; // epoch ms — clients derive a clock offset from this
 }
 
 // WebSocket Message Types
@@ -115,7 +131,7 @@ export type ClientMessage =
   | { type: 'join'; payload: { code: string; teamName: string; deviceToken?: string } }
   | { type: 'rejoin'; payload: { code: string; teamName: string; teamPin: string; deviceToken?: string } }
   | { type: 'answer.submit'; payload: { questionId: string; ink?: StrokeInk; text?: string } }
-  | { type: 'host.auth'; payload: { token: string } }
+  | { type: 'host.auth'; payload: { token: string; code: string } }
   | { type: 'host.start'; payload?: { idempotencyKey?: string } }
   | { type: 'host.next_phase'; payload?: { idempotencyKey?: string } }
   | { type: 'host.prev_phase'; payload?: { idempotencyKey?: string } }
@@ -135,9 +151,13 @@ export type ServerMessage =
   | { type: 'question.open'; payload: { prompt: string; type: QuestionType; points: number; endsAt: number; options?: string[] } }
   | { type: 'question.locked'; payload: { timestamp: number } }
   | { type: 'answer.count'; payload: { answered: number; total: number } }
+  /** Server's verdict on a submission. The phone stays unlocked until this says accepted. */
+  | { type: 'answer.ack'; payload: { questionId: string; accepted: boolean; reason?: string } }
   | { type: 'board.answer'; payload: { questionId: string; prompt: string; correctAnswer: string; points: number } }
   | { type: 'board.cards'; payload: { questionId: string; submissions: Submission[] } }
   | { type: 'board.mark'; payload: { teamId: string; isCorrect: boolean | null } }
+  /** Batched form of `board.mark` — one frame for a whole mark-all sweep. */
+  | { type: 'board.marks'; payload: { marks: { teamId: string; isCorrect: boolean | null }[] } }
   | { type: 'board.spotlight'; payload: { teamId: string | null } }
   | { type: 'leaderboard.update'; payload: { standings: { teamId: string; name: string; score: number; rank: number }[] } }
   | { type: 'team.registered'; payload: { teamId: string; teamName: string; teamPin: string; deviceToken: string } }

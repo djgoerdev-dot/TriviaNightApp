@@ -1,13 +1,13 @@
 import crypto from 'node:crypto';
 import { db } from '../db/client.js';
 import type {
+  ClientRole,
   LiveSessionState,
   SessionPhase,
   Team,
   Submission,
   Question,
   Category,
-  TriviaEvent,
   StrokeInk,
   QuestionType
 } from '@trivia/shared';
@@ -15,6 +15,14 @@ import type {
 export interface InternalQuestion extends Question {
   categoryTitle: string;
 }
+
+export interface SubmitResult {
+  accepted: boolean;
+  reason?: string;
+}
+
+/** Late answers are still accepted this long after the timer expires. */
+export const GRACE_WINDOW_MS = 1500;
 
 export class LiveSession {
   sessionId: string;
@@ -26,13 +34,18 @@ export class LiveSession {
 
   categories: Category[] = [];
   flatQuestions: InternalQuestion[] = [];
+  questionPoints: Map<string, number> = new Map();
   currentCategoryIndex = 0;
   currentQuestionIndex = 0;
-  boardQuestionIndex = 0; // index within current category being marked on answer board
 
   questionEndsAt: number | null = null;
   timerHandle: NodeJS.Timeout | null = null;
   spotlightTeamId: string | null = null;
+
+  // A question stays submittable for GRACE_WINDOW_MS after it locks, so an
+  // answer sent on time but delayed in flight is not thrown away.
+  graceQuestionId: string | null = null;
+  graceUntil: number | null = null;
 
   teams: Map<string, Team> = new Map(); // teamId -> Team
   teamsByToken: Map<string, string> = new Map(); // deviceToken -> teamId
@@ -44,6 +57,7 @@ export class LiveSession {
 
   onStateChange: () => void;
   onBoardMark: (teamId: string, isCorrect: boolean | null) => void;
+  onBoardMarks: (marks: { teamId: string; isCorrect: boolean | null }[]) => void;
   onSpotlight: (teamId: string | null) => void;
 
   constructor(
@@ -54,6 +68,7 @@ export class LiveSession {
     callbacks: {
       onStateChange: () => void;
       onBoardMark: (teamId: string, isCorrect: boolean | null) => void;
+      onBoardMarks: (marks: { teamId: string; isCorrect: boolean | null }[]) => void;
       onSpotlight: (teamId: string | null) => void;
     }
   ) {
@@ -63,6 +78,7 @@ export class LiveSession {
     this.joinCode = joinCode;
     this.onStateChange = callbacks.onStateChange;
     this.onBoardMark = callbacks.onBoardMark;
+    this.onBoardMarks = callbacks.onBoardMarks;
     this.onSpotlight = callbacks.onSpotlight;
 
     this.loadEventData();
@@ -75,6 +91,7 @@ export class LiveSession {
 
     this.categories = [];
     this.flatQuestions = [];
+    this.questionPoints.clear();
 
     for (const cat of catRows) {
       const qRows = db.prepare(`
@@ -104,8 +121,40 @@ export class LiveSession {
 
       questions.forEach(q => {
         this.flatQuestions.push({ ...q, categoryTitle: cat.title });
+        this.questionPoints.set(q.id, q.points);
         this.submissions.set(q.id, new Map());
       });
+    }
+  }
+
+  /**
+   * Restores live progress after a process restart. Without this every
+   * rehydrated session would resume at the constructor defaults — LOBBY,
+   * category 0 — and drop a room mid-event back to the start.
+   */
+  public restoreProgress(row: {
+    phase?: string | null;
+    status?: string | null;
+    current_category_index?: number | null;
+    current_question_index?: number | null;
+  }) {
+    const clamp = (n: number | null | undefined, max: number) =>
+      Math.min(Math.max(Number(n) || 0, 0), Math.max(max, 0));
+
+    if (row.status === 'draft' || row.status === 'live' || row.status === 'ended') {
+      this.status = row.status;
+    }
+    if (row.phase) this.phase = row.phase as SessionPhase;
+
+    this.currentCategoryIndex = clamp(row.current_category_index, this.categories.length - 1);
+    const catQuestions = this.currentCategory?.questions.length ?? 1;
+    this.currentQuestionIndex = clamp(row.current_question_index, catQuestions - 1);
+
+    // A question cannot still be "live" across a restart: its timer died with
+    // the old process. Resume it locked so the host decides what happens next.
+    if (this.phase === 'QUESTION_LIVE') {
+      this.phase = 'QUESTION_LOCKED';
+      this.questionEndsAt = null;
     }
   }
 
@@ -118,9 +167,13 @@ export class LiveSession {
     return this.currentCategory.questions[this.currentQuestionIndex];
   }
 
+  /**
+   * The board always shows the question that just closed, so it is simply the
+   * current question. Kept as a named getter because the board phases read
+   * better through it, and callers elsewhere already use it.
+   */
   get currentBoardQuestion(): Question | undefined {
-    if (!this.currentCategory) return undefined;
-    return this.currentCategory.questions[this.boardQuestionIndex];
+    return this.currentQuestion;
   }
 
   // --- Session Control Actions ---
@@ -129,12 +182,26 @@ export class LiveSession {
     if (this.categories.length === 0) return;
     this.currentCategoryIndex = 0;
     this.currentQuestionIndex = 0;
-    this.boardQuestionIndex = 0;
     this.phase = 'CATEGORY_INTRO';
     this.persistSession();
     this.onStateChange();
   }
 
+  private get isLastQuestionInCategory(): boolean {
+    const cat = this.currentCategory;
+    return !cat || this.currentQuestionIndex + 1 >= cat.questions.length;
+  }
+
+  /**
+   * One question, one board. Each question closes, its answer goes up, the
+   * cards are revealed and marked, and only then does the next question open:
+   *
+   *   CATEGORY_INTRO
+   *     └─ QUESTION_LIVE → QUESTION_LOCKED → BOARD_ANSWER → BOARD_CARDS ─┐
+   *          ↑                                                           │
+   *          └──────────────── next question in category ────────────────┘
+   *     └─ after the last question → CATEGORY_SCORES → next category
+   */
   public nextPhase() {
     switch (this.phase) {
       case 'LOBBY':
@@ -150,37 +217,27 @@ export class LiveSession {
         break;
 
       case 'QUESTION_LOCKED':
-        // If more questions exist in this category, move to next question live
-        if (this.currentCategory && this.currentQuestionIndex + 1 < this.currentCategory.questions.length) {
-          this.currentQuestionIndex++;
-          this.openCurrentQuestion();
-        } else {
-          // Category questions finished -> enter ANSWER BOARD for Q1 of this category
-          this.boardQuestionIndex = 0;
-          this.phase = 'BOARD_ANSWER'; // Stage 1: Official answer displayed, cards face-down
-          this.persistSession();
-          this.onStateChange();
-        }
+        // The board follows immediately: answer up, cards still face-down.
+        this.phase = 'BOARD_ANSWER';
+        this.persistSession();
+        this.onStateChange();
         break;
 
       case 'BOARD_ANSWER':
-        // Stage 2: Reveal all cards
+        // Stage 2: reveal every team's handwriting at once.
         this.phase = 'BOARD_CARDS';
         this.persistSession();
         this.onStateChange();
         break;
 
       case 'BOARD_CARDS':
-        // Confirm & advance to next question's board or Category Leaderboard
-        if (this.currentCategory && this.boardQuestionIndex + 1 < this.currentCategory.questions.length) {
-          this.boardQuestionIndex++;
-          this.phase = 'BOARD_ANSWER';
-          this.persistSession();
-          this.onStateChange();
+        // Marking confirmed. Next question, or the category leaderboard.
+        this.recalculateScores();
+        if (!this.isLastQuestionInCategory) {
+          this.currentQuestionIndex++;
+          this.openCurrentQuestion();
         } else {
-          // All questions in category have been marked -> show Category Scores
           this.phase = 'CATEGORY_SCORES';
-          this.recalculateScores();
           this.persistSession();
           this.onStateChange();
         }
@@ -191,7 +248,6 @@ export class LiveSession {
         if (this.currentCategoryIndex + 1 < this.categories.length) {
           this.currentCategoryIndex++;
           this.currentQuestionIndex = 0;
-          this.boardQuestionIndex = 0;
           this.phase = 'CATEGORY_INTRO';
           this.persistSession();
           this.onStateChange();
@@ -208,20 +264,48 @@ export class LiveSession {
     }
   }
 
+  /**
+   * Back navigation, so the host can re-open a board and fix a mark. Walks the
+   * per-question cycle in reverse; from a question's board it steps back into
+   * the previous question's board rather than re-opening a closed timer.
+   */
   public prevPhase() {
-    // Back navigation safety override
-    if (this.phase === 'BOARD_CARDS') {
-      this.phase = 'BOARD_ANSWER';
-      this.onStateChange();
-    } else if (this.phase === 'BOARD_ANSWER' && this.boardQuestionIndex > 0) {
-      this.boardQuestionIndex--;
-      this.phase = 'BOARD_CARDS';
-      this.onStateChange();
-    } else if (this.phase === 'QUESTION_LOCKED' && this.currentQuestionIndex > 0) {
-      this.currentQuestionIndex--;
-      this.phase = 'QUESTION_LOCKED';
-      this.onStateChange();
+    switch (this.phase) {
+      case 'BOARD_CARDS':
+        this.phase = 'BOARD_ANSWER';
+        break;
+
+      case 'BOARD_ANSWER':
+        this.phase = 'QUESTION_LOCKED';
+        break;
+
+      case 'QUESTION_LIVE':
+      case 'QUESTION_LOCKED': {
+        if (this.currentQuestionIndex === 0) return;
+        if (this.timerHandle) {
+          clearTimeout(this.timerHandle);
+          this.timerHandle = null;
+        }
+        this.questionEndsAt = null;
+        this.graceQuestionId = null;
+        this.graceUntil = null;
+        this.currentQuestionIndex--;
+        this.phase = 'BOARD_CARDS'; // re-open the previous question's board
+        break;
+      }
+
+      case 'CATEGORY_SCORES':
+        // Back into the board for the category's final question.
+        this.phase = 'BOARD_CARDS';
+        break;
+
+      default:
+        return;
     }
+
+    this.spotlightTeamId = null;
+    this.persistSession();
+    this.onStateChange();
   }
 
   public openCurrentQuestion() {
@@ -234,25 +318,17 @@ export class LiveSession {
     }
 
     this.phase = 'QUESTION_LIVE';
+    this.graceQuestionId = null;
+    this.graceUntil = null;
+    this.spotlightTeamId = null; // a spotlight belongs to the board just closed
     const durationMs = (q.timeLimitSeconds || 15) * 1000;
     this.questionEndsAt = Date.now() + durationMs;
 
-    // Pre-create blank submission entries for all teams so accounted for
+    // Blank placeholders so every team is accounted for on the board.
     const qSubmissions = this.submissions.get(q.id) || new Map<string, Submission>();
     for (const team of this.teams.values()) {
       if (!qSubmissions.has(team.id)) {
-        qSubmissions.set(team.id, {
-          id: crypto.randomUUID(),
-          sessionId: this.sessionId,
-          questionId: q.id,
-          teamId: team.id,
-          teamName: team.name,
-          answerInk: null,
-          answerRaw: null,
-          submittedAt: 0,
-          isCorrect: null,
-          isHidden: false
-        });
+        qSubmissions.set(team.id, this.blankSubmission(q.id, team));
       }
     }
     this.submissions.set(q.id, qSubmissions);
@@ -268,95 +344,142 @@ export class LiveSession {
     this.onStateChange();
   }
 
-  public lockCurrentQuestion() {
+  /**
+   * Locks the live question. Guarded on phase: a stray `host.lock_question`
+   * during a board phase must not rewind the session and re-run the blank
+   * pre-marking pass over marks the host has already set.
+   */
+  public lockCurrentQuestion(): boolean {
+    if (this.phase !== 'QUESTION_LIVE') return false;
+
     if (this.timerHandle) {
       clearTimeout(this.timerHandle);
       this.timerHandle = null;
     }
     this.phase = 'QUESTION_LOCKED';
-    this.questionEndsAt = null;
 
-    // Pre-mark blank submissions as incorrect (overridable)
     const q = this.currentQuestion;
     if (q) {
+      // Keep accepting in-flight answers for a moment after the cutoff, where
+      // the cutoff is whichever came first: the timer expiring, or the host
+      // locking early. Anchoring on questionEndsAt alone would hand a manual
+      // early lock the whole remaining countdown as grace.
+      const cutoff = Math.min(this.questionEndsAt ?? Date.now(), Date.now());
+      this.graceQuestionId = q.id;
+      this.graceUntil = cutoff + GRACE_WINDOW_MS;
+
+      // Pre-mark blank submissions as incorrect (overridable by the host, and
+      // cleared again if a grace-window answer lands for that team).
       const qSubs = this.submissions.get(q.id);
       if (qSubs) {
+        const touched: Submission[] = [];
         for (const sub of qSubs.values()) {
-          const hasContent = (sub.answerInk && sub.answerInk.s && sub.answerInk.s.length > 0) ||
-                             (sub.answerRaw && sub.answerRaw.trim().length > 0);
-          if (!hasContent) {
-            sub.isCorrect = false; // Blank pre-marks as incorrect
+          if (!this.hasContent(sub) && sub.isCorrect !== false) {
+            sub.isCorrect = false;
+            touched.push(sub);
           }
         }
+        this.persistSubmissions(touched);
       }
     }
 
+    this.questionEndsAt = null;
     this.persistSession();
     this.onStateChange();
+    return true;
   }
 
   // --- Submissions ---
 
-  public submitAnswer(teamId: string, ink?: StrokeInk, text?: string): boolean {
-    const q = this.currentQuestion;
-    if (!q || this.phase !== 'QUESTION_LIVE') return false;
+  private hasContent(sub: Submission): boolean {
+    return Boolean(
+      (sub.answerInk && sub.answerInk.s && sub.answerInk.s.length > 0) ||
+      (sub.answerRaw && sub.answerRaw.trim().length > 0)
+    );
+  }
 
-    // Enforce grace window of 1.5s
-    const graceWindowMs = 1500;
-    if (this.questionEndsAt && Date.now() > this.questionEndsAt + graceWindowMs) {
-      return false; // rejected as too late
-    }
-
-    const team = this.teams.get(teamId);
-    if (!team) return false;
-
-    let qSubs = this.submissions.get(q.id);
-    if (!qSubs) {
-      qSubs = new Map();
-      this.submissions.set(q.id, qSubs);
-    }
-
-    const submission: Submission = {
+  private blankSubmission(questionId: string, team: Team): Submission {
+    return {
       id: crypto.randomUUID(),
       sessionId: this.sessionId,
-      questionId: q.id,
-      teamId,
+      questionId,
+      teamId: team.id,
       teamName: team.name,
-      answerInk: ink || null,
-      answerRaw: text || null,
-      submittedAt: Date.now(),
+      answerInk: null,
+      answerRaw: null,
+      submittedAt: 0,
       isCorrect: null,
       isHidden: false
     };
+  }
 
-    qSubs.set(teamId, submission);
+  /** Returns the submission record for a team, creating a blank one if absent. */
+  private ensureSubmission(questionId: string, teamId: string): Submission | null {
+    const team = this.teams.get(teamId);
+    if (!team) return null;
 
-    // Save to database
-    try {
-      db.prepare(`
-        INSERT INTO submissions (id, session_id, question_id, team_id, answer_ink, answer_raw, submitted_at, is_correct, is_hidden)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(session_id, question_id, team_id) DO UPDATE SET
-          answer_ink = excluded.answer_ink,
-          answer_raw = excluded.answer_raw,
-          submitted_at = excluded.submitted_at
-      `).run(
-        submission.id,
-        this.sessionId,
-        q.id,
-        teamId,
-        ink ? JSON.stringify(ink) : null,
-        text || null,
-        submission.submittedAt,
-        null,
-        0
-      );
-    } catch (err) {
-      console.error('[DB] Error saving submission:', err);
+    let qSubs = this.submissions.get(questionId);
+    if (!qSubs) {
+      qSubs = new Map();
+      this.submissions.set(questionId, qSubs);
     }
 
+    let sub = qSubs.get(teamId);
+    if (!sub) {
+      sub = this.blankSubmission(questionId, team);
+      qSubs.set(teamId, sub);
+    }
+    return sub;
+  }
+
+  public submitAnswer(teamId: string, questionId: string, ink?: StrokeInk, text?: string): SubmitResult {
+    const team = this.teams.get(teamId);
+    if (!team) return { accepted: false, reason: 'Team is not registered in this session' };
+
+    const now = Date.now();
+    const live = this.currentQuestion;
+
+    // Accept either the open question, or the one that just locked while this
+    // answer was still in flight.
+    let targetId: string | null = null;
+    if (this.phase === 'QUESTION_LIVE' && live) {
+      if (this.questionEndsAt && now > this.questionEndsAt + GRACE_WINDOW_MS) {
+        return { accepted: false, reason: 'The timer for this question has closed' };
+      }
+      targetId = live.id;
+    } else if (
+      this.phase === 'QUESTION_LOCKED' &&
+      this.graceQuestionId &&
+      this.graceUntil &&
+      now <= this.graceUntil
+    ) {
+      targetId = this.graceQuestionId;
+    }
+
+    if (!targetId) {
+      return { accepted: false, reason: 'The timer for this question has closed' };
+    }
+
+    // Guard against a phone that woke up holding a stale question.
+    if (questionId && questionId !== targetId) {
+      return { accepted: false, reason: 'That answer was for a previous question' };
+    }
+
+    const sub = this.ensureSubmission(targetId, teamId);
+    if (!sub) return { accepted: false, reason: 'Team is not registered in this session' };
+
+    sub.answerInk = ink || null;
+    sub.answerRaw = text || null;
+    sub.submittedAt = now;
+    sub.teamName = team.name;
+    sub.isHidden = false;
+    // A grace-window answer arrives after lock() pre-marked the blank card
+    // incorrect; hand it back to the host unmarked.
+    sub.isCorrect = null;
+
+    this.persistSubmissions([sub]);
     this.onStateChange();
-    return true;
+    return { accepted: true };
   }
 
   // --- Marking on the Answer Board ---
@@ -365,64 +488,65 @@ export class LiveSession {
     const q = this.currentBoardQuestion;
     if (!q) return;
 
-    const qSubs = this.submissions.get(q.id);
-    if (!qSubs) return;
-
-    const sub = qSubs.get(teamId);
+    const sub = this.ensureSubmission(q.id, teamId);
     if (!sub) return;
 
     sub.isCorrect = isCorrect;
-
-    try {
-      db.prepare(`
-        UPDATE submissions SET is_correct = ? WHERE session_id = ? AND question_id = ? AND team_id = ?
-      `).run(isCorrect === null ? null : (isCorrect ? 1 : 0), this.sessionId, q.id, teamId);
-    } catch (err) {
-      console.error('[DB] Error updating mark:', err);
-    }
+    this.persistSubmissions([sub]);
 
     this.onBoardMark(teamId, isCorrect);
     this.recalculateScores();
+    this.onStateChange();
   }
 
+  /**
+   * Sweeps every card on the current board question. Does the whole pass in
+   * one place — one transaction, one rescore, one broadcast — rather than
+   * routing each team through markAnswer, which used to cost a DB write, a
+   * full rescore and a separate frame per team.
+   */
   public markAll(mode: 'correct' | 'wrong' | 'clear') {
     const q = this.currentBoardQuestion;
     if (!q) return;
 
-    const qSubs = this.submissions.get(q.id);
-    if (!qSubs) return;
+    const touched: Submission[] = [];
+    const marks: { teamId: string; isCorrect: boolean | null }[] = [];
 
-    for (const sub of qSubs.values()) {
-      const hasContent = (sub.answerInk && sub.answerInk.s.length > 0) || (sub.answerRaw && sub.answerRaw.length > 0);
+    for (const team of this.teams.values()) {
+      const sub = this.ensureSubmission(q.id, team.id);
+      if (!sub) continue;
+
+      const content = this.hasContent(sub);
+      let next: boolean | null;
       if (mode === 'clear') {
-        sub.isCorrect = hasContent ? null : false;
+        next = content ? null : false;
       } else if (mode === 'correct') {
-        if (hasContent) sub.isCorrect = true;
-      } else if (mode === 'wrong') {
-        sub.isCorrect = false;
+        next = content ? true : false; // a blank card is never "correct"
+      } else {
+        next = false;
       }
 
-      this.markAnswer(sub.teamId, sub.isCorrect ?? null);
+      if (sub.isCorrect !== next) {
+        sub.isCorrect = next;
+        touched.push(sub);
+      }
+      marks.push({ teamId: team.id, isCorrect: next });
     }
+
+    this.persistSubmissions(touched);
+    this.recalculateScores();
+    this.onBoardMarks(marks);
     this.onStateChange();
   }
 
   public toggleHideCard(teamId: string) {
     const q = this.currentBoardQuestion;
     if (!q) return;
-    const qSubs = this.submissions.get(q.id);
-    if (!qSubs) return;
-    const sub = qSubs.get(teamId);
+    const sub = this.ensureSubmission(q.id, teamId);
     if (!sub) return;
 
     sub.isHidden = !sub.isHidden;
-    try {
-      db.prepare(`
-        UPDATE submissions SET is_hidden = ? WHERE session_id = ? AND question_id = ? AND team_id = ?
-      `).run(sub.isHidden ? 1 : 0, this.sessionId, q.id, teamId);
-    } catch (err) {
-      console.error('[DB] Error toggling card hide:', err);
-    }
+    this.persistSubmissions([sub]);
     this.onStateChange();
   }
 
@@ -435,7 +559,7 @@ export class LiveSession {
   // --- Team Management ---
 
   public joinTeam(name: string, deviceToken?: string): Team {
-    const cleanName = name.trim();
+    const cleanName = name.trim().slice(0, 30);
     const token = deviceToken || crypto.randomUUID();
 
     // Check if device already registered
@@ -444,19 +568,20 @@ export class LiveSession {
       const existingTeam = this.teams.get(existingId);
       if (existingTeam) {
         existingTeam.status = 'connected';
+        this.onStateChange();
         return existingTeam;
       }
     }
 
     // Disambiguate duplicate name
-    let finalName = cleanName;
+    let finalName = cleanName || 'Team';
     let counter = 2;
     while (this.teamsByName.has(finalName.toLowerCase())) {
-      finalName = `${cleanName} (${counter++})`;
+      finalName = `${cleanName || 'Team'} (${counter++})`;
     }
 
     const teamId = crypto.randomUUID();
-    const pin = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit PIN
+    const pin = crypto.randomInt(1000, 10000).toString(); // 4-digit PIN
 
     const team: Team = {
       id: teamId,
@@ -492,9 +617,18 @@ export class LiveSession {
     if (!teamId) return null;
 
     const team = this.teams.get(teamId);
-    if (!team || team.teamPin !== pin.trim()) return null;
+    if (!team || !team.teamPin) return null;
 
-    // Associate new device token
+    // Constant-time compare so the PIN cannot be probed by timing.
+    const given = Buffer.from(pin.trim());
+    const expected = Buffer.from(team.teamPin);
+    if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+
+    // The takeover device replaces the old one: drop every previous token so a
+    // dead phone that comes back cannot keep acting as this team.
+    for (const [tok, id] of this.teamsByToken.entries()) {
+      if (id === teamId) this.teamsByToken.delete(tok);
+    }
     this.teamsByToken.set(newDeviceToken, teamId);
     team.status = 'connected';
 
@@ -514,18 +648,16 @@ export class LiveSession {
     const team = this.teams.get(teamId);
     if (!team) return;
 
-    this.scoreEvents.push({
-      id: crypto.randomUUID(),
-      teamId,
-      points: deltaPoints,
-      reason
-    });
+    const delta = Math.trunc(Number(deltaPoints) || 0);
+    const id = crypto.randomUUID();
+
+    this.scoreEvents.push({ id, teamId, points: delta, reason });
 
     try {
       db.prepare(`
         INSERT INTO score_events (id, session_id, team_id, question_id, points, reason, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(crypto.randomUUID(), this.sessionId, teamId, null, deltaPoints, reason, Date.now());
+      `).run(id, this.sessionId, teamId, null, delta, reason, Date.now());
     } catch (err) {
       console.error('[DB] Error recording score event:', err);
     }
@@ -538,14 +670,24 @@ export class LiveSession {
     const team = this.teams.get(teamId);
     if (!team) return;
 
-    const oldLower = team.name.toLowerCase();
-    this.teamsByName.delete(oldLower);
+    const cleaned = newName.trim().slice(0, 30);
+    if (!cleaned) return;
 
-    team.name = newName.trim();
-    this.teamsByName.set(team.name.toLowerCase(), teamId);
+    const existing = this.teamsByName.get(cleaned.toLowerCase());
+    if (existing && existing !== teamId) return; // refuse to create a duplicate
+
+    this.teamsByName.delete(team.name.toLowerCase());
+    team.name = cleaned;
+    this.teamsByName.set(cleaned.toLowerCase(), teamId);
+
+    // Cards carry a denormalized team name; keep them in step.
+    for (const qSubs of this.submissions.values()) {
+      const sub = qSubs.get(teamId);
+      if (sub) sub.teamName = cleaned;
+    }
 
     try {
-      db.prepare('UPDATE teams SET name = ? WHERE id = ?').run(team.name, teamId);
+      db.prepare('UPDATE teams SET name = ? WHERE id = ?').run(cleaned, teamId);
     } catch (err) {
       console.error('[DB] Error renaming team:', err);
     }
@@ -553,27 +695,33 @@ export class LiveSession {
     this.onStateChange();
   }
 
+  /**
+   * Totals are derived, never stored. Walks the submissions once per team
+   * rather than the whole question list, so a mark-all sweep on a 24-team
+   * board stays linear instead of quadratic.
+   */
   public recalculateScores() {
+    const totals = new Map<string, number>();
+    for (const teamId of this.teams.keys()) totals.set(teamId, 0);
+
+    for (const [questionId, qSubs] of this.submissions.entries()) {
+      const points = this.questionPoints.get(questionId) ?? 0;
+      if (!points) continue;
+      for (const sub of qSubs.values()) {
+        if (sub.isCorrect === true && totals.has(sub.teamId)) {
+          totals.set(sub.teamId, totals.get(sub.teamId)! + points);
+        }
+      }
+    }
+
+    for (const ev of this.scoreEvents) {
+      if (totals.has(ev.teamId)) {
+        totals.set(ev.teamId, totals.get(ev.teamId)! + ev.points);
+      }
+    }
+
     for (const team of this.teams.values()) {
-      let total = 0;
-
-      // Sum correct submissions
-      for (const q of this.flatQuestions) {
-        const qSubs = this.submissions.get(q.id);
-        const sub = qSubs?.get(team.id);
-        if (sub && sub.isCorrect === true) {
-          total += q.points;
-        }
-      }
-
-      // Sum manual score adjustment events
-      for (const ev of this.scoreEvents) {
-        if (ev.teamId === team.id) {
-          total += ev.points;
-        }
-      }
-
-      team.score = total;
+      team.score = totals.get(team.id) ?? 0;
     }
   }
 
@@ -581,47 +729,53 @@ export class LiveSession {
     const q = this.currentBoardQuestion;
     if (!q) return [];
 
-    const qSubs = this.submissions.get(q.id);
     const result: Submission[] = [];
-
-    // Return in order of joined teams
     for (const team of this.teams.values()) {
-      const sub = qSubs?.get(team.id);
-      if (sub) {
-        result.push(sub);
-      } else {
-        result.push({
-          id: 'blank-' + team.id,
-          sessionId: this.sessionId,
-          questionId: q.id,
-          teamId: team.id,
-          teamName: team.name,
-          answerInk: null,
-          answerRaw: null,
-          submittedAt: 0,
-          isCorrect: false,
-          isHidden: false
-        });
-      }
+      const sub = this.ensureSubmission(q.id, team.id);
+      if (sub) result.push(sub);
     }
-
     return result;
   }
 
-  public getSnapshot(): LiveSessionState {
-    const q = (this.phase === 'BOARD_ANSWER' || this.phase === 'BOARD_CARDS')
-      ? this.currentBoardQuestion
-      : this.currentQuestion;
+  public getTeamSubmission(questionId: string, teamId: string): Submission | null {
+    return this.ensureSubmission(questionId, teamId);
+  }
+
+  /**
+   * Builds the snapshot for one role. The host sees everything; the big screen
+   * sees the correct answer only once the board is up; a team never sees the
+   * correct answer or anybody's takeover PIN.
+   */
+  public getSnapshot(role: ClientRole = 'team'): LiveSessionState {
+    const onBoard = this.phase === 'BOARD_ANSWER' || this.phase === 'BOARD_CARDS';
+    const q = this.currentQuestion;
 
     const qSubs = q ? this.submissions.get(q.id) : null;
     let answeredCount = 0;
     if (qSubs) {
       for (const sub of qSubs.values()) {
-        if ((sub.answerInk && sub.answerInk.s.length > 0) || (sub.answerRaw && sub.answerRaw.length > 0)) {
-          answeredCount++;
-        }
+        if (this.hasContent(sub)) answeredCount++;
       }
     }
+
+    let connected = 0;
+    for (const team of this.teams.values()) {
+      if (team.status === 'connected') connected++;
+    }
+
+    const maySeeAnswer = role === 'host' || (role === 'screen' && onBoard);
+    const maySeePins = role === 'host';
+
+    const teams: Team[] = Array.from(this.teams.values()).map(t => ({
+      id: t.id,
+      sessionId: t.sessionId,
+      name: t.name,
+      ...(maySeePins ? { teamPin: t.teamPin } : {}),
+      answerMode: t.answerMode,
+      status: t.status,
+      score: t.score,
+      joinedAt: t.joinedAt
+    }));
 
     return {
       sessionId: this.sessionId,
@@ -631,9 +785,7 @@ export class LiveSession {
       status: this.status,
       phase: this.phase,
       currentCategoryIndex: this.currentCategoryIndex,
-      currentQuestionIndex: (this.phase === 'BOARD_ANSWER' || this.phase === 'BOARD_CARDS')
-        ? this.boardQuestionIndex
-        : this.currentQuestionIndex,
+      currentQuestionIndex: this.currentQuestionIndex,
       currentCategory: this.currentCategory ? {
         id: this.currentCategory.id,
         title: this.currentCategory.title,
@@ -644,20 +796,61 @@ export class LiveSession {
         type: q.type,
         prompt: q.prompt,
         options: q.options,
-        correctAnswer: q.correctAnswer,
+        ...(maySeeAnswer ? { correctAnswer: q.correctAnswer } : {}),
         points: q.points,
         timeLimitSeconds: q.timeLimitSeconds,
         position: q.position
       } : null,
       questionEndsAt: this.questionEndsAt,
+      graceUntil: this.graceUntil,
       spotlightTeamId: this.spotlightTeamId,
       answerCount: {
         answered: answeredCount,
+        connected,
         total: this.teams.size
       },
-      teams: Array.from(this.teams.values()),
+      teams,
       serverTime: Date.now()
     };
+  }
+
+  private persistSubmissions(subs: Submission[]) {
+    if (subs.length === 0) return;
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO submissions (id, session_id, question_id, team_id, answer_ink, answer_raw, submitted_at, is_correct, is_hidden)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, question_id, team_id) DO UPDATE SET
+          answer_ink = excluded.answer_ink,
+          answer_raw = excluded.answer_raw,
+          submitted_at = excluded.submitted_at,
+          is_correct = excluded.is_correct,
+          is_hidden = excluded.is_hidden
+      `);
+
+      db.exec('BEGIN');
+      try {
+        for (const sub of subs) {
+          stmt.run(
+            sub.id,
+            this.sessionId,
+            sub.questionId,
+            sub.teamId,
+            sub.answerInk ? JSON.stringify(sub.answerInk) : null,
+            sub.answerRaw ?? null,
+            sub.submittedAt,
+            sub.isCorrect == null ? null : (sub.isCorrect ? 1 : 0),
+            sub.isHidden ? 1 : 0
+          );
+        }
+        db.exec('COMMIT');
+      } catch (inner) {
+        db.exec('ROLLBACK');
+        throw inner;
+      }
+    } catch (err) {
+      console.error('[DB] Error persisting submissions:', err);
+    }
   }
 
   private persistSession() {
@@ -665,15 +858,21 @@ export class LiveSession {
       db.prepare(`
         UPDATE sessions SET
           status = ?, phase = ?, current_category_id = ?, current_question_id = ?,
-          question_ends_at = ?, spotlight_team_id = ?
+          current_category_index = ?, current_question_index = ?,
+          question_ends_at = ?, spotlight_team_id = ?, ended_at = ?
         WHERE id = ?
       `).run(
         this.status,
         this.phase,
         this.currentCategory?.id || null,
-        this.currentQuestion?.id || null,
+        (this.phase === 'BOARD_ANSWER' || this.phase === 'BOARD_CARDS'
+          ? this.currentBoardQuestion?.id
+          : this.currentQuestion?.id) || null,
+        this.currentCategoryIndex,
+        this.currentQuestionIndex,
         this.questionEndsAt,
         this.spotlightTeamId,
+        this.status === 'ended' ? Date.now() : null,
         this.sessionId
       );
     } catch (err) {

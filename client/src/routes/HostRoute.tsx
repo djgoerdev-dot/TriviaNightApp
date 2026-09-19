@@ -16,9 +16,21 @@ import {
   ChevronRight
 } from 'lucide-react';
 
-const SHORTCUT_KEYS = '123456789QWERTYUIOPASDFGHJKLZXCVBNM'.split('');
+// A, Z and C are reserved for mark-all-correct / mark-all-wrong / clear, so
+// they must not also be card shortcuts — pressing the key printed on a card
+// used to sweep the entire board instead of toggling that one answer.
+const SHORTCUT_KEYS = '123456789QWERTYUIOPSDFGHJKLXVBNM'.split('');
+const RESERVED_KEYS = new Set(['A', 'Z', 'C', 'ENTER']);
 
 export const HostRoute: React.FC = () => {
+  const [hostToken, setHostToken] = useState<string>(() => {
+    try { return localStorage.getItem('trivia.hostToken') || ''; } catch { return ''; }
+  });
+  const [loginEmail, setLoginEmail] = useState('host@trivia.app');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+
   const [activeTab, setActiveTab] = useState<'live' | 'author'>('live');
   const [events, setEvents] = useState<any[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>('');
@@ -55,13 +67,64 @@ export const HostRoute: React.FC = () => {
   } = useSessionSocket({
     role: 'host',
     code: sessionCode,
-    autoConnect: !!sessionCode
+    hostToken,
+    autoConnect: !!sessionCode && !!hostToken
   });
+
+  const signOut = () => {
+    try { localStorage.removeItem('trivia.hostToken'); } catch { /* ignore */ }
+    setHostToken('');
+    setSessionCode('');
+    setEvents([]);
+  };
+
+  /** fetch() with the host bearer token; a 401 drops us back to sign-in. */
+  const authFetch = async (url: string, init: RequestInit = {}) => {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        ...(init.headers || {}),
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        Authorization: `Bearer ${hostToken}`
+      }
+    });
+    if (res.status === 401) {
+      signOut();
+      throw new Error('Session expired — please sign in again.');
+    }
+    return res;
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    setLoggingIn(true);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail.trim(), password: loginPassword })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.token) {
+        setLoginError(data.error || 'Invalid email or password');
+        return;
+      }
+      try { localStorage.setItem('trivia.hostToken', data.token); } catch { /* ignore */ }
+      setHostToken(data.token);
+      setLoginPassword('');
+    } catch {
+      setLoginError('Could not reach the server.');
+    } finally {
+      setLoggingIn(false);
+    }
+  };
 
   // Load authored events and check for active live session
   const refreshEvents = async () => {
+    if (!hostToken) return;
     try {
-      const res = await fetch('/api/events');
+      const res = await authFetch('/api/events');
       const data = await res.json();
       setEvents(data.events || []);
       if (data.events?.length > 0 && !selectedEventId) {
@@ -69,7 +132,7 @@ export const HostRoute: React.FC = () => {
       }
 
       // Check for running live session
-      const liveRes = await fetch('/api/sessions/live');
+      const liveRes = await authFetch('/api/sessions/live');
       const liveData = await liveRes.json();
       if (liveData.session) {
         setSessionCode(liveData.session.joinCode);
@@ -81,13 +144,13 @@ export const HostRoute: React.FC = () => {
 
   useEffect(() => {
     refreshEvents();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostToken]);
 
   const handleLaunchSession = async (eventId: string) => {
     try {
-      const res = await fetch('/api/sessions', {
+      const res = await authFetch('/api/sessions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ eventId })
       });
       const data = await res.json();
@@ -135,7 +198,10 @@ export const HostRoute: React.FC = () => {
           return;
         }
 
-        // 1-9, Q-P toggle individual cards
+        // Individual card toggles. RESERVED_KEYS are handled above and are
+        // deliberately absent from SHORTCUT_KEYS; the guard keeps the two
+        // sets from drifting back into collision.
+        if (RESERVED_KEYS.has(key)) return;
         const idx = SHORTCUT_KEYS.indexOf(key);
         if (idx >= 0 && idx < boardCards.length) {
           e.preventDefault();
@@ -156,6 +222,67 @@ export const HostRoute: React.FC = () => {
   const phase = sessionState?.phase || 'LOBBY';
   const currentCategory = sessionState?.currentCategory;
   const currentQuestion = sessionState?.currentQuestion;
+
+  // --- Sign-in gate -------------------------------------------------------
+  // The console reads authoring data, which carries every correct answer, so
+  // it is host-only. Without a token the API returns 401 and the WebSocket
+  // refuses to register this socket as a host.
+  if (!hostToken) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 bg-[#EFF2EE]">
+        <form
+          onSubmit={handleLogin}
+          className="w-full max-w-sm bg-white border border-[#D2DACF] rounded-2xl p-6 shadow-sm"
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#1B7A5A]" />
+            <h1 className="font-extrabold text-lg text-[#14181A]">Host Console</h1>
+          </div>
+          <p className="text-xs text-[#5C6B64] mb-6">Sign in to author events and run a night.</p>
+
+          {loginError && (
+            <div className="mb-4 p-3 rounded-lg bg-[#F6DEDB] text-[#B93E33] text-xs font-semibold">
+              {loginError}
+            </div>
+          )}
+
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[#5C6B64] mb-1.5" htmlFor="host-email">
+            Email
+          </label>
+          <input
+            id="host-email"
+            type="email"
+            autoComplete="username"
+            value={loginEmail}
+            onChange={e => setLoginEmail(e.target.value)}
+            className="w-full mb-4 px-3.5 py-2.5 bg-white border border-[#D2DACF] rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1B7A5A]"
+            required
+          />
+
+          <label className="block text-xs font-semibold uppercase tracking-wider text-[#5C6B64] mb-1.5" htmlFor="host-password">
+            Password
+          </label>
+          <input
+            id="host-password"
+            type="password"
+            autoComplete="current-password"
+            value={loginPassword}
+            onChange={e => setLoginPassword(e.target.value)}
+            className="w-full mb-6 px-3.5 py-2.5 bg-white border border-[#D2DACF] rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#1B7A5A]"
+            required
+          />
+
+          <button
+            type="submit"
+            disabled={loggingIn || !loginEmail || !loginPassword}
+            className="w-full py-3 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-xl font-semibold text-sm shadow transition-all disabled:opacity-40"
+          >
+            {loggingIn ? 'Signing in…' : 'Sign in'}
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#EFF2EE] text-[#14181A] flex flex-col font-sans">
@@ -267,11 +394,9 @@ export const HostRoute: React.FC = () => {
                     onClick={hostNextPhase}
                     className="flex items-center gap-2 px-5 py-2.5 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-xl font-bold text-sm shadow transition-all"
                   >
-                    <span>
-                      {sessionState && sessionState.currentQuestionIndex + 1 < (currentCategory?.totalQuestions || 0)
-                        ? 'Next Question ▶'
-                        : 'Open Answer Board ▶'}
-                    </span>
+                    {/* Every question goes straight to its own board. */}
+                    <Eye size={16} />
+                    <span>Open Answer Board ▶</span>
                   </button>
                 )}
 
@@ -290,7 +415,11 @@ export const HostRoute: React.FC = () => {
                     onClick={hostNextPhase}
                     className="flex items-center gap-2 px-6 py-2.5 bg-[#1B7A5A] hover:bg-[#146046] text-white rounded-xl font-bold text-sm shadow transition-all"
                   >
-                    <span>Confirm & Next (Enter)</span>
+                    <span>
+                      {sessionState && sessionState.currentQuestionIndex + 1 < (currentCategory?.totalQuestions || 0)
+                        ? 'Confirm & Next Question (Enter)'
+                        : 'Confirm & Category Scores (Enter)'}
+                    </span>
                   </button>
                 )}
 
