@@ -12,8 +12,9 @@ import { registerWebSocketRoutes } from './routes/ws.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const fastify = Fastify({
-  logger: {
+let loggerConfig: any = true;
+try {
+  loggerConfig = {
     transport: {
       target: 'pino-pretty',
       options: {
@@ -21,7 +22,13 @@ const fastify = Fastify({
         ignore: 'pid,hostname'
       }
     }
-  }
+  };
+} catch (_) {
+  loggerConfig = true;
+}
+
+const fastify = Fastify({
+  logger: loggerConfig
 });
 
 async function main() {
@@ -36,7 +43,7 @@ async function main() {
 
   await fastify.register(websocketPlugin, {
     options: {
-      maxPayload: 1024 * 1024 // 1MB max payload (way above stroke JSON ~5KB)
+      maxPayload: 1024 * 1024 // 1MB max payload
     }
   });
 
