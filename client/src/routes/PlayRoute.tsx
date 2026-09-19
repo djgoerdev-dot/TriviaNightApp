@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSessionSocket } from '../hooks/useSessionSocket';
 import { InkCanvas } from '../components/ink/InkCanvas';
 import { InkSvg } from '../components/ink/InkSvg';
 import type { StrokeInk } from '@trivia/shared';
-import { CheckCircle2, ArrowUpRight, Sparkles, Smartphone, Maximize2, Minimize2, X } from 'lucide-react';
+import { CheckCircle2, ArrowUpRight, Sparkles, Smartphone, Maximize2, Minimize2, X, Clock } from 'lucide-react';
 
 export const PlayRoute: React.FC = () => {
   // Query parameters: ?code=123456
@@ -45,8 +45,16 @@ export const PlayRoute: React.FC = () => {
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Time remaining percentage for timer bar
+  // Time remaining percentage for timer bar and remaining seconds
   const [timerPercent, setTimerPercent] = useState(100);
+  const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
+
+  const currentInkRef = useRef<StrokeInk | null>(null);
+  currentInkRef.current = currentInk;
+  const isSubmittedRef = useRef(false);
+  isSubmittedRef.current = isSubmitted;
+  const isSubmittingRef = useRef(false);
+  isSubmittingRef.current = isSubmitting;
 
   // Feature detection for Fullscreen API (unsupported for DOM elements on iOS Safari)
   const isFullscreenSupported = typeof document !== 'undefined' && Boolean(
@@ -178,10 +186,24 @@ export const PlayRoute: React.FC = () => {
     setTeamPin(registeredTeam.pin);
   }, [registeredTeam]);
 
+  // Auto submit answer helper
+  const autoSubmitAnswer = useCallback((qId: string) => {
+    if (isSubmittedRef.current || isSubmittingRef.current) return;
+    const ink = currentInkRef.current;
+    if (!ink || !ink.s || ink.s.length === 0) return;
+
+    clearError();
+    setLockedInkMap(prev => ({ ...prev, [qId]: ink }));
+    setIsSubmitting(true);
+    isSubmittingRef.current = true;
+    submitAnswer(qId, ink);
+  }, [clearError, submitAnswer]);
+
   // Handle timer countdown against server clock
   useEffect(() => {
     if (!sessionState?.questionEndsAt || sessionState.phase !== 'QUESTION_LIVE') {
       setTimerPercent(100);
+      setSecondsRemaining(null);
       return;
     }
 
@@ -191,12 +213,18 @@ export const PlayRoute: React.FC = () => {
     const tick = () => {
       const remaining = endsAt - serverNow();
       setTimerPercent(Math.max(0, Math.min(100, (remaining / totalDuration) * 100)));
+      const secs = Math.max(0, Math.ceil(remaining / 1000));
+      setSecondsRemaining(secs);
+
+      if (remaining <= 0 && sessionState.currentQuestion?.id) {
+        autoSubmitAnswer(sessionState.currentQuestion.id);
+      }
     };
 
     tick();
     const interval = setInterval(tick, 100);
     return () => clearInterval(interval);
-  }, [sessionState?.questionEndsAt, sessionState?.phase, sessionState?.currentQuestion?.timeLimitSeconds, serverNow]);
+  }, [sessionState?.questionEndsAt, sessionState?.phase, sessionState?.currentQuestion?.timeLimitSeconds, sessionState?.currentQuestion?.id, serverNow, autoSubmitAnswer]);
 
   // Reset submission state on next question
   const lastQuestionIdRef = useRef<string | null>(null);
@@ -205,7 +233,11 @@ export const PlayRoute: React.FC = () => {
       lastQuestionIdRef.current = sessionState.currentQuestion.id;
       setIsSubmitted(false);
       setIsSubmitting(false);
+      isSubmittedRef.current = false;
+      isSubmittingRef.current = false;
       setCurrentInk(null);
+      currentInkRef.current = null;
+      setSecondsRemaining(null);
       clearError();
     }
   }, [sessionState?.currentQuestion?.id, clearError]);
@@ -245,31 +277,30 @@ export const PlayRoute: React.FC = () => {
     rejoinTeam(code.trim(), teamName.trim(), teamPin.trim(), deviceToken);
   };
 
-  const handleSubmitAnswer = () => {
-    if (!currentInk || !currentInk.s || currentInk.s.length === 0 || !sessionState?.currentQuestion?.id || isSubmitted || isSubmitting) return;
-    clearError();
-    const qId = sessionState.currentQuestion.id;
-    setLockedInkMap(prev => ({ ...prev, [qId]: currentInk }));
-    const sent = submitAnswer(qId, currentInk);
-    if (sent) {
-      setIsSubmitting(true);
-    } else {
-      setIsSubmitting(false);
-    }
-  };
-
   // Auto-lock drawn strokes on question lock/timeout so whatever is on screen is locked in
   useEffect(() => {
     if (sessionState?.phase === 'QUESTION_LOCKED' && sessionState.currentQuestion?.id) {
-      if (!isSubmitted && !isSubmitting && currentInk && currentInk.s && currentInk.s.length > 0) {
+      autoSubmitAnswer(sessionState.currentQuestion.id);
+    }
+  }, [sessionState?.phase, sessionState?.currentQuestion?.id, autoSubmitAnswer]);
+
+  const handleStrokeChange = useCallback((ink: StrokeInk) => {
+    setCurrentInk(ink);
+    currentInkRef.current = ink;
+
+    // If time is already up or question is locked, auto-submit flushed stroke immediately
+    const isTimeExpired = (secondsRemaining !== null && secondsRemaining <= 0) || sessionState?.phase === 'QUESTION_LOCKED';
+    if (isTimeExpired && sessionState?.currentQuestion?.id && !isSubmittedRef.current) {
+      const qId = sessionState.currentQuestion.id;
+      if (ink.s && ink.s.length > 0) {
         clearError();
-        const qId = sessionState.currentQuestion.id;
-        setLockedInkMap(prev => ({ ...prev, [qId]: currentInk }));
+        setLockedInkMap(prev => ({ ...prev, [qId]: ink }));
         setIsSubmitting(true);
-        submitAnswer(qId, currentInk);
+        isSubmittingRef.current = true;
+        submitAnswer(qId, ink);
       }
     }
-  }, [sessionState?.phase, sessionState?.currentQuestion?.id, currentInk, isSubmitted, isSubmitting, clearError, submitAnswer]);
+  }, [secondsRemaining, sessionState?.phase, sessionState?.currentQuestion?.id, clearError, submitAnswer]);
 
   // Find team & card
   const myTeam = myTeamId ? sessionState?.teams.find(t => t.id === myTeamId) : undefined;
@@ -595,17 +626,19 @@ export const PlayRoute: React.FC = () => {
                   </span>
                 </div>
 
-                {/* Submission Controls in Top Right */}
+                {/* Top Right Status: Live Countdown or Lock Confirmation */}
                 <div className="flex-none">
                   {!isSubmitted && !isSubmitting && phase === 'QUESTION_LIVE' && (
-                    <button
-                      type="button"
-                      onClick={handleSubmitAnswer}
-                      disabled={!currentInk || !currentInk.s || currentInk.s.length === 0}
-                      className="px-3.5 py-1 bg-[#238B5E] hover:bg-[#1C754E] active:scale-[0.98] text-white rounded-xl font-bold text-xs md:text-sm shadow transition-all disabled:opacity-35 disabled:pointer-events-none"
+                    <div
+                      className={`px-2.5 py-1 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-colors shadow-sm ${
+                        secondsRemaining !== null && secondsRemaining <= 5
+                          ? 'bg-amber-950/60 border border-amber-500/60 text-amber-300 animate-pulse'
+                          : 'bg-[#14261E] border border-[#2EA572]/40 text-[#42DB99]'
+                      }`}
                     >
-                      Lock it in
-                    </button>
+                      <Clock size={13} className={secondsRemaining !== null && secondsRemaining <= 5 ? 'text-amber-400' : 'text-[#42DB99]'} />
+                      <span>{secondsRemaining !== null ? `${secondsRemaining}s` : 'Live'}</span>
+                    </div>
                   )}
 
                   {(isSubmitted || isSubmitting) && (
@@ -615,7 +648,7 @@ export const PlayRoute: React.FC = () => {
                     </div>
                   )}
 
-                  {!isSubmitted && !isSubmitting && phase === 'QUESTION_LOCKED' && (
+                  {!isSubmitted && !isSubmitting && (phase === 'QUESTION_LOCKED' || (secondsRemaining !== null && secondsRemaining <= 0)) && (
                     <div className="px-3 py-1 bg-[#1E2623] border border-[#3A4843] rounded-xl text-center text-xs font-semibold text-[#8C9F97] flex items-center gap-1.5 animate-fade-in">
                       <span>— No answer recorded —</span>
                     </div>
@@ -631,7 +664,11 @@ export const PlayRoute: React.FC = () => {
               {/* Sleek Timer Bar */}
               <div className="w-full h-1 bg-[#121A17] rounded-full overflow-hidden mt-1.5 border border-[#25332C]">
                 <div
-                  className="h-full bg-[#2EA572] shadow-[0_0_6px_rgba(46,165,114,0.6)] transition-all duration-100 ease-linear rounded-full"
+                  className={`h-full transition-all duration-100 ease-linear rounded-full ${
+                    secondsRemaining !== null && secondsRemaining <= 5
+                      ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.7)]'
+                      : 'bg-[#2EA572] shadow-[0_0_6px_rgba(46,165,114,0.6)]'
+                  }`}
                   style={{ width: `${timerPercent}%` }}
                 />
               </div>
@@ -642,8 +679,8 @@ export const PlayRoute: React.FC = () => {
               <InkCanvas
                 key={sessionState.currentQuestion.id}
                 teamName={teamName}
-                isLocked={isSubmitted || isSubmitting || phase === 'QUESTION_LOCKED'}
-                onStrokeChange={ink => setCurrentInk(ink)}
+                isLocked={isSubmitted || isSubmitting || phase === 'QUESTION_LOCKED' || (secondsRemaining !== null && secondsRemaining <= 0)}
+                onStrokeChange={handleStrokeChange}
               />
             </div>
           </div>
